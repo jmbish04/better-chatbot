@@ -1,4 +1,27 @@
+/**
+ * Chat UI — React island component for the Astro frontend.
+ *
+ * Features:
+ * - Password auth gate with browser autofill disabled
+ * - Model selector dropdown grouped by provider (Workers AI + gateway)
+ * - Streaming SSE chat with Workers AI and gateway providers
+ * - Voice input (STT via Whisper) and output (TTS via MeloTTS)
+ * - Dynamic background image generation after first AI response
+ * - Suggestion chips for quick prompts on empty state
+ *
+ * Auth flow:
+ * 1. On mount, checks GET /auth/check to see if auth is required
+ * 2. If required and not authenticated, shows a password prompt
+ * 3. On submit, POST /auth with the password
+ * 4. On success, the server sets an HttpOnly auth cookie
+ * 5. Subsequent requests pass the cookie automatically
+ *
+ * @module Chat
+ */
+
 import { useState, useRef, useEffect, useCallback } from "react";
+
+/* ── Types ── */
 
 interface Message {
   role: "user" | "assistant";
@@ -19,9 +42,21 @@ interface ProviderGroup {
   models: ModelInfo[];
 }
 
+/* ── Constants ── */
+
 const DEFAULT_MODEL = "@cf/meta/llama-3.1-8b-instruct";
 
+/* ── Main component ── */
+
 export default function Chat() {
+  /* ── Auth state ── */
+  const [authChecking, setAuthChecking] = useState(true);
+  const [authRequired, setAuthRequired] = useState(false);
+  const [authenticated, setAuthenticated] = useState(false);
+  const [authError, setAuthError] = useState("");
+  const [password, setPassword] = useState("");
+
+  /* ── Chat state ── */
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState("");
   const [isStreaming, setIsStreaming] = useState(false);
@@ -33,21 +68,38 @@ export default function Chat() {
   const [bgLoading, setBgLoading] = useState(false);
   const [isRecording, setIsRecording] = useState(false);
   const [voiceProcessing, setVoiceProcessing] = useState(false);
+
+  /* ── Refs ── */
   const scrollRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const audioChunksRef = useRef<Blob[]>([]);
   const modelPickerRef = useRef<HTMLDivElement>(null);
 
-  // Load models on mount
+  /* ── Auth check on mount ── */
   useEffect(() => {
+    fetch("/auth/check")
+      .then((res) => res.json())
+      .then((data: { authenticated: boolean; required: boolean }) => {
+        setAuthRequired(data.required);
+        setAuthenticated(data.authenticated);
+      })
+      .catch(() => {
+        // If auth check fails, assume no auth required
+        setAuthenticated(true);
+      })
+      .finally(() => setAuthChecking(false));
+  }, []);
+
+  /* ── Load models after auth ── */
+  useEffect(() => {
+    if (!authenticated) return;
     fetch("/models")
       .then((res) => res.json())
       .then((data: { providers: ProviderGroup[] }) => {
         setProviders(data.providers);
       })
       .catch(() => {
-        // Fallback
         setProviders([{
           provider: "Workers AI / Meta",
           slug: "workers-ai",
@@ -57,9 +109,9 @@ export default function Chat() {
         }]);
       })
       .finally(() => setModelsLoading(false));
-  }, []);
+  }, [authenticated]);
 
-  // Auto-scroll
+  /* ── Auto-scroll on new messages ── */
   useEffect(() => {
     scrollRef.current?.scrollTo({
       top: scrollRef.current.scrollHeight,
@@ -67,12 +119,12 @@ export default function Chat() {
     });
   }, [messages]);
 
-  // Focus input on mount
+  /* ── Focus input on mount ── */
   useEffect(() => {
-    inputRef.current?.focus();
-  }, []);
+    if (authenticated) inputRef.current?.focus();
+  }, [authenticated]);
 
-  // Close model picker on click outside
+  /* ── Close model picker on click outside ── */
   useEffect(() => {
     const handler = (e: MouseEvent) => {
       if (modelPickerRef.current && !modelPickerRef.current.contains(e.target as Node)) {
@@ -83,6 +135,7 @@ export default function Chat() {
     return () => document.removeEventListener("mousedown", handler);
   }, []);
 
+  /* ── Selected model display name ── */
   const selectedModelName = (() => {
     for (const group of providers) {
       const model = group.models.find(m => m.id === selectedModel);
@@ -91,6 +144,29 @@ export default function Chat() {
     return selectedModel.split("/").pop() ?? selectedModel;
   })();
 
+  /* ── Auth submission handler ── */
+  const submitAuth = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setAuthError("");
+    try {
+      const res = await fetch("/auth", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ password }),
+      });
+      if (res.ok) {
+        setAuthenticated(true);
+        setPassword("");
+      } else {
+        const data = (await res.json()) as { error?: string };
+        setAuthError(data.error || "Invalid password");
+      }
+    } catch {
+      setAuthError("Connection error");
+    }
+  };
+
+  /* ── Background image generation ── */
   const triggerBackgroundImage = useCallback(async (prompt: string) => {
     setBgLoading(true);
     try {
@@ -110,6 +186,7 @@ export default function Chat() {
     }
   }, []);
 
+  /* ── Send message handler ── */
   const sendMessage = useCallback(async (overrideText?: string) => {
     const text = (overrideText ?? input).trim();
     if (!text || isStreaming) return;
@@ -233,6 +310,7 @@ export default function Chat() {
     }
   }, [input, isStreaming, selectedModel, messages, triggerBackgroundImage]);
 
+  /* ── Keyboard handler ── */
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
@@ -240,7 +318,7 @@ export default function Chat() {
     }
   };
 
-  // Voice recording
+  /* ── Voice recording ── */
   const startRecording = async () => {
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
@@ -274,10 +352,10 @@ export default function Chat() {
     }
   };
 
+  /** Process recorded audio: STT → chat → TTS. */
   const processVoice = async (audioBlob: Blob) => {
     setVoiceProcessing(true);
     try {
-      // 1. STT
       const sttRes = await fetch("/voice/stt", {
         method: "POST",
         body: await audioBlob.arrayBuffer(),
@@ -291,14 +369,10 @@ export default function Chat() {
         return;
       }
 
-      // 2. Send as chat message and wait for it to complete
       await sendMessage(transcribedText);
 
-      // 3. TTS on the latest assistant response — read fresh from state
-      // Use a small delay to ensure state is updated after sendMessage completes
       setTimeout(async () => {
         try {
-          // Get the latest messages from the DOM/state
           const historyRes = await fetch("/history");
           const historyData = (await historyRes.json()) as { messages?: { role: string; content: string }[] };
           const latestAssistant = historyData.messages
@@ -330,7 +404,7 @@ export default function Chat() {
     }
   };
 
-  // Categorize models for grouped display
+  /* ── Model grouping for dropdown ── */
   const chatModels = providers.map(g => ({
     ...g,
     models: g.models.filter(m => m.category === "chat" || m.category === "code"),
@@ -341,6 +415,125 @@ export default function Chat() {
     models: g.models.filter(m => m.category === "image" || m.category === "vision"),
   })).filter(g => g.models.length > 0);
 
+  /* ── Loading screen ── */
+  if (authChecking) {
+    return (
+      <div style={{
+        display: "flex", alignItems: "center", justifyContent: "center",
+        height: "100vh", color: "var(--muted-foreground)",
+      }}>
+        <Spinner />
+      </div>
+    );
+  }
+
+  /* ── Auth gate ── */
+  if (authRequired && !authenticated) {
+    return (
+      <>
+        <style>{`
+          .auth-root {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            height: 100vh;
+            padding: 1rem;
+          }
+          .auth-card {
+            width: 100%;
+            max-width: 360px;
+            background: var(--background);
+            border: 1px solid var(--border);
+            border-radius: 1rem;
+            padding: 2rem;
+            box-shadow: 0 4px 20px rgba(0,0,0,0.2);
+          }
+          .auth-title {
+            font-size: 1.25rem;
+            font-weight: 500;
+            color: var(--foreground);
+            margin-bottom: 0.5rem;
+            text-align: center;
+          }
+          .auth-subtitle {
+            font-size: 0.8125rem;
+            color: var(--muted-foreground);
+            margin-bottom: 1.5rem;
+            text-align: center;
+          }
+          .auth-input {
+            width: 100%;
+            padding: 0.75rem 1rem;
+            border: 1px solid var(--border);
+            border-radius: 0.75rem;
+            background: var(--secondary);
+            color: var(--foreground);
+            font-size: 0.875rem;
+            font-family: inherit;
+            outline: none;
+            transition: border-color 0.15s;
+            margin-bottom: 1rem;
+          }
+          .auth-input:focus {
+            border-color: var(--primary);
+          }
+          .auth-submit {
+            width: 100%;
+            padding: 0.75rem 1rem;
+            border: none;
+            border-radius: 0.75rem;
+            background: var(--primary);
+            color: var(--primary-foreground);
+            font-size: 0.875rem;
+            font-family: inherit;
+            cursor: pointer;
+            transition: opacity 0.15s;
+          }
+          .auth-submit:hover { opacity: 0.9; }
+          .auth-submit:disabled { opacity: 0.5; cursor: default; }
+          .auth-error {
+            color: #ef4444;
+            font-size: 0.8125rem;
+            text-align: center;
+            margin-bottom: 1rem;
+          }
+        `}</style>
+        <div className="auth-root">
+          <form className="auth-card" onSubmit={submitAuth}>
+            <h1 className="auth-title">🔒 Authentication</h1>
+            <p className="auth-subtitle">Enter the access password to continue</p>
+            {authError && <p className="auth-error">{authError}</p>}
+            <input
+              type="password"
+              className="auth-input"
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+              placeholder="Password"
+              autoComplete="off"
+              autoCorrect="off"
+              autoCapitalize="off"
+              spellCheck={false}
+              data-form-type="other"
+              data-lpignore="true"
+              data-1p-ignore="true"
+              name="access-key-field"
+              id="access-key-field"
+              autoFocus
+            />
+            <button
+              type="submit"
+              className="auth-submit"
+              disabled={!password.trim()}
+            >
+              Continue
+            </button>
+          </form>
+        </div>
+      </>
+    );
+  }
+
+  /* ── Main chat UI ── */
   return (
     <>
       <style>{`
@@ -897,6 +1090,7 @@ export default function Chat() {
 
 /* ── Sub-components ── */
 
+/** Greeting / empty state with suggestion chips. */
 function Greeting({ onSuggest }: { onSuggest: (text: string) => void }) {
   const greetings = [
     "What can I help with?",
@@ -932,6 +1126,7 @@ function Greeting({ onSuggest }: { onSuggest: (text: string) => void }) {
   );
 }
 
+/** Chevron down icon for the model selector dropdown toggle. */
 function ChevronDownIcon() {
   return (
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -940,6 +1135,7 @@ function ChevronDownIcon() {
   );
 }
 
+/** Microphone icon for voice input buttons. */
 function MicIcon() {
   return (
     <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -951,6 +1147,7 @@ function MicIcon() {
   );
 }
 
+/** Arrow up icon for the send button. */
 function ArrowUpIcon() {
   return (
     <svg
@@ -969,6 +1166,7 @@ function ArrowUpIcon() {
   );
 }
 
+/** Animated spinner for loading states. */
 function Spinner() {
   return (
     <svg

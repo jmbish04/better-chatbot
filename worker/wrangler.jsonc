@@ -2,8 +2,7 @@
   "$schema": "./node_modules/wrangler/config-schema.json",
   "name": "better-chatbot-worker",
   "main": "./entry.ts",
-  // Set this to today's date
-  "compatibility_date": "2026-03-01",
+  "compatibility_date": "2026-03-07",
   "compatibility_flags": ["nodejs_compat"],
 
   "assets": {
@@ -65,6 +64,7 @@
   //        wrangler secrets-store secret create <STORE_ID> --name ai-gateway-token --scopes workers --remote
   //        wrangler secrets-store secret create <STORE_ID> --name cloudflare-account-id --scopes workers --remote
   //        wrangler secrets-store secret create <STORE_ID> --name cloudflare-images-token --scopes workers --remote
+  //        wrangler secrets-store secret create <STORE_ID> --name worker-api-key --scopes workers --remote
   //   3. Replace REPLACE_WITH_STORE_ID below with your store ID
   "secrets_store_secrets": [
     {
@@ -81,6 +81,11 @@
       "binding": "CLOUDFLARE_IMAGES_TOKEN",
       "store_id": "8c42fa70938644e0a8a109744467375f",
       "secret_name": "CLOUDFLARE_IMAGES_STREAM_TOKEN"
-}
+    },
+    {
+      "binding": "WORKER_API_KEY",
+      "store_id": "8c42fa70938644e0a8a109744467375f",
+      "secret_name": "WORKER_API_KEY"
+    }
   ]
 }

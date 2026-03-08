@@ -11,6 +11,7 @@ declare namespace Cloudflare {
 		CLOUDFLARE_AI_GATEWAY_TOKEN: SecretsStoreSecret;
 		CLOUDFLARE_ACCOUNT_ID: SecretsStoreSecret;
 		CLOUDFLARE_IMAGES_TOKEN: SecretsStoreSecret;
+		WORKER_API_KEY: SecretsStoreSecret;
 		AI: Ai;
 		IMAGES: ImagesBinding;
 		ASSETS: Fetcher;
