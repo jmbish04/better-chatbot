@@ -207,6 +207,7 @@ export default function Chat() {
         headers: {
           "Content-Type": "application/json",
           Accept: "text/event-stream",
+          "x-thread-id": "default",
         },
         body: JSON.stringify({ message: text, model: selectedModel }),
       });
@@ -373,7 +374,7 @@ export default function Chat() {
 
       setTimeout(async () => {
         try {
-          const historyRes = await fetch("/history");
+          const historyRes = await fetch("/history?threadId=default");
           const historyData = (await historyRes.json()) as { messages?: { role: string; content: string }[] };
           const latestAssistant = historyData.messages
             ?.filter(m => m.role === "assistant")
