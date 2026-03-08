@@ -23,7 +23,7 @@
   "kv_namespaces": [
     {
       "binding": "KV",
-      "id": "REPLACE_WITH_KV_NAMESPACE_ID"
+      "id": "3a498ff9d41449129dbb4fca83bad44f"
       // Create via: wrangler kv namespace create KV
       // Then replace the id above with the output namespace ID
     }
@@ -69,17 +69,17 @@
   "secrets_store_secrets": [
     {
       "binding": "CLOUDFLARE_AI_GATEWAY_TOKEN",
-      "store_id": "REPLACE_WITH_STORE_ID",
-      "secret_name": "ai-gateway-token"
+      "store_id": "8c42fa70938644e0a8a109744467375f",
+      "secret_name": "CLOUDFLARE_AI_GATEWAY_TOKEN"
     },
     {
       "binding": "CLOUDFLARE_ACCOUNT_ID",
-      "store_id": "REPLACE_WITH_STORE_ID",
-      "secret_name": "cloudflare-account-id"
+      "store_id": "8c42fa70938644e0a8a109744467375f",
+      "secret_name": "CLOUDFLARE_ACCOUNT_ID"
     },
     {
       "binding": "CLOUDFLARE_IMAGES_TOKEN",
-      "store_id": "REPLACE_WITH_STORE_ID",
+      "store_id": "8c42fa70938644e0a8a109744467375f",
       "secret_name": "cloudflare-images-token"
     }
   ]
