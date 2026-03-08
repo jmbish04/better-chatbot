@@ -28,6 +28,15 @@
     }
   ],
 
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "better-chatbot-db",
+      "database_id": "15c61b0d-bf56-4268-a145-bd294b3a93c2",
+      "migrations_dir": "drizzle/migrations"
+    }
+  ],
+
   "durable_objects": {
     "bindings": [
       {
