@@ -1,0 +1,23 @@
+name = "better-chatbot-worker"
+main = "./entry.ts"
+compatibility_date = "2025-03-01"
+compatibility_flags = ["nodejs_compat"]
+
+[assets]
+binding = "ASSETS"
+directory = "./dist"
+not_found_handling = "single-page-application"
+
+[ai]
+binding = "AI"
+
+[[durable_objects.bindings]]
+name = "AGENT"
+class_name = "ChatAgent"
+
+[[migrations]]
+tag = "v1"
+new_classes = ["ChatAgent"]
+
+[observability]
+enabled = true

@@ -60,3 +60,9 @@ local-data
 openai-compatible.config.ts
 certificates
 public/uploads
+
+# worker (cloudflare)
+worker/dist
+worker/node_modules
+worker/.wrangler
+worker/.astro
