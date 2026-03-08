@@ -454,7 +454,7 @@ function Greeting({ onSuggest }: { onSuggest: (text: string) => void }) {
           {[
             "What can you do?",
             "What time is it?",
-            "Calculate 42 × 17",
+            "Calculate 42 * 17",
           ].map((s) => (
             <button
               key={s}
