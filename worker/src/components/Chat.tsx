@@ -5,13 +5,59 @@ interface Message {
   content: string;
 }
 
+interface ModelInfo {
+  id: string;
+  name: string;
+  provider: string;
+  category: string;
+  supportsStreaming: boolean;
+}
+
+interface ProviderGroup {
+  provider: string;
+  slug: string;
+  models: ModelInfo[];
+}
+
 export default function Chat() {
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState("");
   const [isStreaming, setIsStreaming] = useState(false);
+  const [selectedModel, setSelectedModel] = useState("@cf/meta/llama-3.1-8b-instruct");
+  const [providers, setProviders] = useState<ProviderGroup[]>([]);
+  const [modelsLoading, setModelsLoading] = useState(true);
+  const [showModelPicker, setShowModelPicker] = useState(false);
+  const [backgroundImage, setBackgroundImage] = useState<string | null>(null);
+  const [bgLoading, setBgLoading] = useState(false);
+  const [isRecording, setIsRecording] = useState(false);
+  const [voiceProcessing, setVoiceProcessing] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+  const audioChunksRef = useRef<Blob[]>([]);
+  const modelPickerRef = useRef<HTMLDivElement>(null);
 
+  // Load models on mount
+  useEffect(() => {
+    fetch("/models")
+      .then((res) => res.json())
+      .then((data: { providers: ProviderGroup[] }) => {
+        setProviders(data.providers);
+      })
+      .catch(() => {
+        // Fallback
+        setProviders([{
+          provider: "Workers AI / Meta",
+          slug: "workers-ai",
+          models: [
+            { id: "@cf/meta/llama-3.1-8b-instruct", name: "Llama 3.1 8B", provider: "Meta", category: "chat", supportsStreaming: true },
+          ],
+        }]);
+      })
+      .finally(() => setModelsLoading(false));
+  }, []);
+
+  // Auto-scroll
   useEffect(() => {
     scrollRef.current?.scrollTo({
       top: scrollRef.current.scrollHeight,
@@ -19,18 +65,59 @@ export default function Chat() {
     });
   }, [messages]);
 
+  // Focus input on mount
   useEffect(() => {
     inputRef.current?.focus();
   }, []);
 
-  const sendMessage = useCallback(async () => {
-    const text = input.trim();
+  // Close model picker on click outside
+  useEffect(() => {
+    const handler = (e: MouseEvent) => {
+      if (modelPickerRef.current && !modelPickerRef.current.contains(e.target as Node)) {
+        setShowModelPicker(false);
+      }
+    };
+    document.addEventListener("mousedown", handler);
+    return () => document.removeEventListener("mousedown", handler);
+  }, []);
+
+  const selectedModelName = (() => {
+    for (const group of providers) {
+      const model = group.models.find(m => m.id === selectedModel);
+      if (model) return model.name;
+    }
+    return selectedModel.split("/").pop() ?? selectedModel;
+  })();
+
+  const triggerBackgroundImage = useCallback(async (prompt: string) => {
+    setBgLoading(true);
+    try {
+      const res = await fetch("/generate-image", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ prompt, threadId: "default" }),
+      });
+      const data = (await res.json()) as { imageUrl?: string | null };
+      if (data.imageUrl) {
+        setBackgroundImage(data.imageUrl);
+      }
+    } catch {
+      // Background image is non-critical
+    } finally {
+      setBgLoading(false);
+    }
+  }, []);
+
+  const sendMessage = useCallback(async (overrideText?: string) => {
+    const text = (overrideText ?? input).trim();
     if (!text || isStreaming) return;
 
     const userMsg: Message = { role: "user", content: text };
     setMessages((prev) => [...prev, userMsg]);
     setInput("");
     setIsStreaming(true);
+
+    const isFirstMessage = messages.filter(m => m.role === "assistant").length === 0;
 
     const assistantMsg: Message = { role: "assistant", content: "" };
     setMessages((prev) => [...prev, assistantMsg]);
@@ -42,7 +129,7 @@ export default function Chat() {
           "Content-Type": "application/json",
           Accept: "text/event-stream",
         },
-        body: JSON.stringify({ message: text }),
+        body: JSON.stringify({ message: text, model: selectedModel }),
       });
 
       if (!res.ok) {
@@ -76,6 +163,7 @@ export default function Chat() {
       }
 
       let accumulated = "";
+      let shouldGenImage = false;
 
       while (true) {
         const { done, value } = await reader.read();
@@ -102,10 +190,18 @@ export default function Chat() {
                 return updated;
               });
             }
+            if (parsed.type === "generateImage") {
+              shouldGenImage = true;
+            }
           } catch {
             /* skip malformed SSE chunks */
           }
         }
+      }
+
+      // Trigger background image after first response
+      if ((shouldGenImage || isFirstMessage) && accumulated.length > 0) {
+        triggerBackgroundImage(accumulated.slice(0, 200));
       }
 
       if (!accumulated) {
@@ -133,7 +229,7 @@ export default function Chat() {
     } finally {
       setIsStreaming(false);
     }
-  }, [input, isStreaming]);
+  }, [input, isStreaming, selectedModel, messages, triggerBackgroundImage]);
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.key === "Enter" && !e.shiftKey) {
@@ -141,6 +237,101 @@ export default function Chat() {
       sendMessage();
     }
   };
+
+  // Voice recording
+  const startRecording = async () => {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const mediaRecorder = new MediaRecorder(stream, { mimeType: "audio/webm" });
+      audioChunksRef.current = [];
+
+      mediaRecorder.ondataavailable = (e) => {
+        if (e.data.size > 0) {
+          audioChunksRef.current.push(e.data);
+        }
+      };
+
+      mediaRecorder.onstop = async () => {
+        stream.getTracks().forEach(t => t.stop());
+        const audioBlob = new Blob(audioChunksRef.current, { type: "audio/webm" });
+        await processVoice(audioBlob);
+      };
+
+      mediaRecorderRef.current = mediaRecorder;
+      mediaRecorder.start();
+      setIsRecording(true);
+    } catch {
+      // Microphone access denied or unavailable
+    }
+  };
+
+  const stopRecording = () => {
+    if (mediaRecorderRef.current?.state === "recording") {
+      mediaRecorderRef.current.stop();
+      setIsRecording(false);
+    }
+  };
+
+  const processVoice = async (audioBlob: Blob) => {
+    setVoiceProcessing(true);
+    try {
+      // 1. STT
+      const sttRes = await fetch("/voice/stt", {
+        method: "POST",
+        body: await audioBlob.arrayBuffer(),
+        headers: { "Content-Type": "audio/webm" },
+      });
+      const sttData = (await sttRes.json()) as { text?: string };
+      const transcribedText = sttData.text?.trim();
+
+      if (!transcribedText) {
+        setVoiceProcessing(false);
+        return;
+      }
+
+      // 2. Send as chat message
+      await sendMessage(transcribedText);
+
+      // 3. TTS on the response (get latest assistant message)
+      const latestAssistant = messages
+        .filter(m => m.role === "assistant")
+        .pop();
+
+      if (latestAssistant?.content) {
+        try {
+          const ttsRes = await fetch("/voice/tts", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ text: latestAssistant.content.slice(0, 500) }),
+          });
+
+          if (ttsRes.ok) {
+            const audioData = await ttsRes.arrayBuffer();
+            const audio = new Audio();
+            audio.src = URL.createObjectURL(new Blob([audioData], { type: "audio/wav" }));
+            audio.play().catch(() => {});
+          }
+        } catch {
+          // TTS failure is non-critical
+        }
+      }
+    } catch {
+      // Voice processing failed
+    } finally {
+      setVoiceProcessing(false);
+    }
+  };
+
+  // Categorize models for grouped display
+  const chatModels = providers.map(g => ({
+    ...g,
+    models: g.models.filter(m => m.category === "chat" || m.category === "code"),
+  })).filter(g => g.models.length > 0);
+
+  const imageModels = providers.map(g => ({
+    ...g,
+    models: g.models.filter(m => m.category === "image" || m.category === "vision"),
+  })).filter(g => g.models.length > 0);
 
   return (
     <>
@@ -151,6 +342,134 @@ export default function Chat() {
           height: 100vh;
           max-height: 100dvh;
           position: relative;
+          overflow: hidden;
+        }
+        .chat-bg {
+          position: absolute;
+          inset: 0;
+          z-index: 0;
+          background-size: cover;
+          background-position: center;
+          opacity: 0.12;
+          transition: opacity 0.8s ease, background-image 0.8s ease;
+          pointer-events: none;
+        }
+        .chat-bg.loaded { opacity: 0.15; }
+
+        /* ── Top bar ── */
+        .top-bar {
+          position: relative;
+          z-index: 10;
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+          padding: 0.5rem 1rem;
+          border-bottom: 1px solid var(--border);
+          background: color-mix(in oklch, var(--background) 85%, transparent);
+          backdrop-filter: blur(8px);
+        }
+        .model-selector {
+          position: relative;
+        }
+        .model-btn {
+          display: inline-flex;
+          align-items: center;
+          gap: 0.375rem;
+          padding: 0.375rem 0.75rem;
+          border-radius: 9999px;
+          border: 1px solid var(--border);
+          background: var(--secondary);
+          color: var(--secondary-foreground);
+          font-size: 0.75rem;
+          font-family: inherit;
+          cursor: pointer;
+          transition: background 0.15s, border-color 0.15s;
+          white-space: nowrap;
+        }
+        .model-btn:hover { background: var(--muted); border-color: var(--input); }
+        .model-btn svg { width: 12px; height: 12px; flex-shrink: 0; }
+        .model-dropdown {
+          position: absolute;
+          top: calc(100% + 4px);
+          left: 0;
+          min-width: 280px;
+          max-height: 400px;
+          overflow-y: auto;
+          background: var(--background);
+          border: 1px solid var(--border);
+          border-radius: 0.75rem;
+          box-shadow: 0 8px 30px rgba(0,0,0,0.3);
+          z-index: 100;
+          padding: 0.25rem;
+        }
+        .model-group-label {
+          padding: 0.5rem 0.75rem 0.25rem;
+          font-size: 0.6875rem;
+          font-weight: 600;
+          color: var(--muted-foreground);
+          text-transform: uppercase;
+          letter-spacing: 0.05em;
+        }
+        .model-option {
+          display: flex;
+          align-items: center;
+          gap: 0.5rem;
+          width: 100%;
+          padding: 0.5rem 0.75rem;
+          border: none;
+          border-radius: 0.5rem;
+          background: transparent;
+          color: var(--foreground);
+          font-size: 0.8125rem;
+          font-family: inherit;
+          cursor: pointer;
+          text-align: left;
+          transition: background 0.1s;
+        }
+        .model-option:hover { background: var(--muted); }
+        .model-option.active { background: var(--accent); }
+        .model-option .cat-badge {
+          font-size: 0.625rem;
+          padding: 0.125rem 0.375rem;
+          border-radius: 9999px;
+          background: var(--muted);
+          color: var(--muted-foreground);
+          margin-left: auto;
+          flex-shrink: 0;
+        }
+        .top-actions {
+          display: flex;
+          align-items: center;
+          gap: 0.5rem;
+        }
+        .icon-btn {
+          display: inline-flex;
+          align-items: center;
+          justify-content: center;
+          width: 2rem;
+          height: 2rem;
+          border-radius: 9999px;
+          border: 1px solid var(--border);
+          background: transparent;
+          color: var(--foreground);
+          cursor: pointer;
+          transition: background 0.15s, color 0.15s;
+          flex-shrink: 0;
+        }
+        .icon-btn:hover { background: var(--muted); }
+        .icon-btn.recording {
+          background: #ef4444;
+          color: white;
+          border-color: #ef4444;
+          animation: pulse 1.5s infinite;
+        }
+        .icon-btn.processing {
+          opacity: 0.5;
+          pointer-events: none;
+        }
+        @keyframes pulse {
+          0%, 100% { box-shadow: 0 0 0 0 rgba(239,68,68,0.4); }
+          50% { box-shadow: 0 0 0 6px rgba(239,68,68,0); }
         }
 
         /* ── Messages scroll area ── */
@@ -159,6 +478,8 @@ export default function Chat() {
           overflow-y: auto;
           padding: 1.5rem 0;
           scrollbar-gutter: stable both-edges;
+          position: relative;
+          z-index: 1;
         }
 
         /* ── Message row ── */
@@ -266,6 +587,8 @@ export default function Chat() {
           margin: 0 auto;
           padding: 0 1rem 1rem;
           animation: fadeIn 0.5s ease;
+          position: relative;
+          z-index: 10;
         }
         .input-box {
           position: relative;
@@ -288,7 +611,7 @@ export default function Chat() {
           display: flex;
           flex-direction: column;
           gap: 0.875rem;
-          padding: 0.5rem 1.25rem 1rem;
+          padding: 0.5rem 1.25rem 0.5rem;
         }
         .input-textarea {
           flex: 1;
@@ -309,8 +632,13 @@ export default function Chat() {
         .input-actions {
           display: flex;
           align-items: center;
-          justify-content: flex-end;
+          justify-content: space-between;
           padding: 0 0.75rem 0.5rem;
+        }
+        .input-left-actions {
+          display: flex;
+          align-items: center;
+          gap: 0.25rem;
         }
         .send-btn {
           display: inline-flex;
@@ -355,9 +683,116 @@ export default function Chat() {
           0%, 60%, 100% { opacity: 0.3; transform: translateY(0); }
           30% { opacity: 1; transform: translateY(-3px); }
         }
+
+        /* ── BG loading ── */
+        .bg-indicator {
+          position: fixed;
+          bottom: 5rem;
+          right: 1rem;
+          font-size: 0.6875rem;
+          color: var(--muted-foreground);
+          background: var(--background);
+          border: 1px solid var(--border);
+          padding: 0.25rem 0.5rem;
+          border-radius: 0.5rem;
+          z-index: 20;
+          display: flex;
+          align-items: center;
+          gap: 0.25rem;
+          animation: fadeIn 0.3s ease;
+        }
       `}</style>
 
       <div className="chat-root">
+        {/* Background image */}
+        {backgroundImage && (
+          <div
+            className={`chat-bg ${backgroundImage ? "loaded" : ""}`}
+            style={{ backgroundImage: `url(${backgroundImage})` }}
+          />
+        )}
+
+        {/* Top bar with model selector and voice */}
+        <div className="top-bar">
+          <div className="model-selector" ref={modelPickerRef}>
+            <button
+              className="model-btn"
+              onClick={() => setShowModelPicker(!showModelPicker)}
+              disabled={modelsLoading}
+            >
+              {modelsLoading ? "Loading…" : selectedModelName}
+              <ChevronDownIcon />
+            </button>
+
+            {showModelPicker && (
+              <div className="model-dropdown">
+                {chatModels.length > 0 && (
+                  <>
+                    <div className="model-group-label">Chat Models</div>
+                    {chatModels.map((group) => (
+                      <div key={group.provider}>
+                        <div className="model-group-label">{group.provider}</div>
+                        {group.models.map((m) => (
+                          <button
+                            key={m.id}
+                            className={`model-option ${m.id === selectedModel ? "active" : ""}`}
+                            onClick={() => {
+                              setSelectedModel(m.id);
+                              setShowModelPicker(false);
+                            }}
+                          >
+                            {m.name}
+                            {m.category !== "chat" && (
+                              <span className="cat-badge">{m.category}</span>
+                            )}
+                          </button>
+                        ))}
+                      </div>
+                    ))}
+                  </>
+                )}
+                {imageModels.length > 0 && (
+                  <>
+                    <div className="model-group-label" style={{ marginTop: "0.5rem", borderTop: "1px solid var(--border)", paddingTop: "0.5rem" }}>
+                      Image / Vision Models
+                    </div>
+                    {imageModels.map((group) => (
+                      <div key={group.provider}>
+                        <div className="model-group-label">{group.provider}</div>
+                        {group.models.map((m) => (
+                          <button
+                            key={m.id}
+                            className={`model-option ${m.id === selectedModel ? "active" : ""}`}
+                            onClick={() => {
+                              setSelectedModel(m.id);
+                              setShowModelPicker(false);
+                            }}
+                          >
+                            {m.name}
+                            <span className="cat-badge">{m.category}</span>
+                          </button>
+                        ))}
+                      </div>
+                    ))}
+                  </>
+                )}
+              </div>
+            )}
+          </div>
+
+          <div className="top-actions">
+            <button
+              className={`icon-btn ${isRecording ? "recording" : ""} ${voiceProcessing ? "processing" : ""}`}
+              onClick={isRecording ? stopRecording : startRecording}
+              disabled={voiceProcessing || isStreaming}
+              title={isRecording ? "Stop recording" : "Voice input"}
+              aria-label={isRecording ? "Stop recording" : "Voice input"}
+            >
+              {voiceProcessing ? <Spinner /> : <MicIcon />}
+            </button>
+          </div>
+        </div>
+
         {/* Messages */}
         <div ref={scrollRef} className="chat-messages">
           {messages.length === 0 ? (
@@ -414,8 +849,20 @@ export default function Chat() {
               />
             </div>
             <div className="input-actions">
+              <div className="input-left-actions">
+                <button
+                  className="icon-btn"
+                  style={{ width: "1.5rem", height: "1.5rem", border: "none" }}
+                  onClick={isRecording ? stopRecording : startRecording}
+                  disabled={voiceProcessing || isStreaming}
+                  title="Voice input"
+                  aria-label="Voice input"
+                >
+                  <MicIcon />
+                </button>
+              </div>
               <button
-                onClick={sendMessage}
+                onClick={() => sendMessage()}
                 disabled={!input.trim() || isStreaming}
                 className="send-btn"
                 aria-label="Send message"
@@ -428,6 +875,13 @@ export default function Chat() {
             Powered by Honi Agent · Workers AI · Cloudflare Edge
           </p>
         </div>
+
+        {/* Background image loading indicator */}
+        {bgLoading && (
+          <div className="bg-indicator">
+            <Spinner /> Generating background…
+          </div>
+        )}
       </div>
     </>
   );
@@ -448,7 +902,7 @@ function Greeting({ onSuggest }: { onSuggest: (text: string) => void }) {
       <div className="greeting-inner">
         <h1 className="greeting-title">{greeting}</h1>
         <p className="greeting-subtitle">
-          Chat with a Honi agent running on Cloudflare Workers AI
+          Chat with AI — powered by Cloudflare Workers, AI Gateway, and multi-provider models
         </p>
         <div className="greeting-suggestions">
           {[
@@ -467,6 +921,25 @@ function Greeting({ onSuggest }: { onSuggest: (text: string) => void }) {
         </div>
       </div>
     </div>
+  );
+}
+
+function ChevronDownIcon() {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <polyline points="6 9 12 15 18 9" />
+    </svg>
+  );
+}
+
+function MicIcon() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z" />
+      <path d="M19 10v2a7 7 0 0 1-14 0v-2" />
+      <line x1="12" y1="19" x2="12" y2="23" />
+      <line x1="8" y1="23" x2="16" y2="23" />
+    </svg>
   );
 }
 

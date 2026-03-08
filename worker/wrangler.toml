@@ -11,6 +11,13 @@ not_found_handling = "single-page-application"
 [ai]
 binding = "AI"
 
+[images]
+binding = "IMAGES"
+
+[[kv_namespaces]]
+binding = "KV"
+id = "REPLACE_WITH_KV_NAMESPACE_ID"
+
 [[durable_objects.bindings]]
 name = "AGENT"
 class_name = "ChatAgent"
@@ -21,3 +28,9 @@ new_classes = ["ChatAgent"]
 
 [observability]
 enabled = true
+
+[vars]
+AI_GATEWAY_ID = "default-gateway"
+# CF_ACCOUNT_ID and CF_IMAGES_TOKEN should be set as secrets via:
+#   wrangler secret put CF_ACCOUNT_ID
+#   wrangler secret put CF_IMAGES_TOKEN

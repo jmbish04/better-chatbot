@@ -1,14 +1,16 @@
 /**
- * Worker entry point — Honi-style agent on Cloudflare Workers.
- *
- * Implements the honidev agent pattern (createAgent / tool / streaming SSE)
- * directly on top of Workers AI + Durable Objects.
+ * Worker entry point — Multi-provider chat agent on Cloudflare Workers.
  *
  * Routes:
- *   POST /chat     → Send a message, stream a response (SSE)
- *   GET  /history  → Retrieve conversation history
- *   POST /reset    → Clear conversation memory
- *   *              → Static Astro assets (ASSETS binding)
+ *   POST /chat            → Send a message via selected model (SSE)
+ *   GET  /models          → List available models grouped by provider
+ *   GET  /history         → Retrieve conversation history
+ *   POST /reset           → Clear conversation memory
+ *   POST /voice/stt       → Speech-to-text (Whisper)
+ *   POST /voice/tts       → Text-to-speech (MeloTTS)
+ *   POST /generate-image  → Generate background image
+ *   GET  /image/:key      → Serve stored image from KV
+ *   *                     → Static Astro assets (ASSETS binding)
  */
 
 /* ── Types ── */
@@ -17,6 +19,11 @@ interface Env {
   AI: Ai;
   ASSETS: Fetcher;
   AGENT: DurableObjectNamespace;
+  KV: KVNamespace;
+  IMAGES: Fetcher;
+  AI_GATEWAY_ID: string;
+  CF_ACCOUNT_ID?: string;
+  CF_IMAGES_TOKEN?: string;
 }
 
 interface ChatMessage {
@@ -24,16 +31,92 @@ interface ChatMessage {
   content: string;
 }
 
-/* ── Agent configuration (mirrors honidev createAgent API) ── */
+interface ModelInfo {
+  id: string;
+  name: string;
+  provider: string;
+  category: "chat" | "image" | "code" | "vision" | "embedding" | "audio" | "other";
+  supportsStreaming: boolean;
+}
 
-const AGENT_CONFIG = {
-  name: "better-chatbot",
-  model: "@cf/meta/llama-3.1-8b-instruct" as const,
-  system: `You are a helpful, friendly chat assistant powered by Cloudflare Workers AI.
+interface ProviderGroup {
+  provider: string;
+  slug: string;
+  models: ModelInfo[];
+}
+
+/* ── Workers AI models registry ── */
+
+const WORKERS_AI_MODELS: ModelInfo[] = [
+  // Meta
+  { id: "@cf/meta/llama-3.1-8b-instruct", name: "Llama 3.1 8B Instruct", provider: "Meta", category: "chat", supportsStreaming: true },
+  { id: "@cf/meta/llama-3.1-70b-instruct", name: "Llama 3.1 70B Instruct", provider: "Meta", category: "chat", supportsStreaming: true },
+  { id: "@cf/meta/llama-3.2-1b-instruct", name: "Llama 3.2 1B Instruct", provider: "Meta", category: "chat", supportsStreaming: true },
+  { id: "@cf/meta/llama-3.2-3b-instruct", name: "Llama 3.2 3B Instruct", provider: "Meta", category: "chat", supportsStreaming: true },
+  { id: "@cf/meta/llama-3.3-70b-instruct-fp8-fast", name: "Llama 3.3 70B Instruct", provider: "Meta", category: "chat", supportsStreaming: true },
+  { id: "@cf/meta/llama-4-scout-17b-16e-instruct", name: "Llama 4 Scout 17B", provider: "Meta", category: "chat", supportsStreaming: true },
+  // Google
+  { id: "@hf/google/gemma-7b-it", name: "Gemma 7B", provider: "Google", category: "chat", supportsStreaming: true },
+  // Mistral
+  { id: "@cf/mistral/mistral-7b-instruct-v0.2", name: "Mistral 7B Instruct v0.2", provider: "Mistral", category: "chat", supportsStreaming: true },
+  // Qwen
+  { id: "@cf/qwen/qwen2.5-coder-32b-instruct", name: "Qwen 2.5 Coder 32B", provider: "Qwen", category: "code", supportsStreaming: true },
+  // DeepSeek
+  { id: "@cf/deepseek-ai/deepseek-r1-distill-qwen-32b", name: "DeepSeek R1 Distill 32B", provider: "DeepSeek", category: "chat", supportsStreaming: true },
+  // Image generation
+  { id: "@cf/bytedance/stable-diffusion-xl-lightning", name: "SDXL Lightning", provider: "ByteDance", category: "image", supportsStreaming: false },
+  { id: "@cf/black-forest-labs/flux-1-schnell", name: "FLUX.1 Schnell", provider: "Black Forest Labs", category: "image", supportsStreaming: false },
+  // Vision
+  { id: "@cf/meta/llama-3.2-11b-vision-instruct", name: "Llama 3.2 11B Vision", provider: "Meta", category: "vision", supportsStreaming: true },
+  // Audio
+  { id: "@cf/openai/whisper-large-v3-turbo", name: "Whisper Large v3 Turbo", provider: "OpenAI", category: "audio", supportsStreaming: false },
+  { id: "@cf/myshell-ai/melotts", name: "MeloTTS", provider: "MyShell AI", category: "audio", supportsStreaming: false },
+];
+
+/* ── Gateway provider definitions ── */
+
+const GATEWAY_PROVIDERS: { slug: string; name: string; chatEndpoint: string; modelListEndpoint?: string; modelsPath?: string }[] = [
+  {
+    slug: "openai",
+    name: "OpenAI",
+    chatEndpoint: "/v1/chat/completions",
+    modelListEndpoint: "/v1/models",
+    modelsPath: "data",
+  },
+  {
+    slug: "anthropic",
+    name: "Anthropic",
+    chatEndpoint: "/v1/messages",
+  },
+  {
+    slug: "google-ai-studio",
+    name: "Google (Gemini)",
+    chatEndpoint: "/v1/chat/completions",
+    modelListEndpoint: "/v1/models",
+    modelsPath: "data",
+  },
+];
+
+/* ── Category filter for gateway models ── */
+
+function categorizeModel(modelId: string): ModelInfo["category"] | null {
+  const lower = modelId.toLowerCase();
+  // Exclude embeddings, moderation, tts, whisper, dall-e
+  if (lower.includes("embedding") || lower.includes("embed")) return null;
+  if (lower.includes("moderation")) return null;
+  if (lower.includes("tts") || lower.includes("whisper") || lower.includes("audio")) return null;
+  if (lower.includes("dall-e") || lower.includes("image") || lower.includes("flux") || lower.includes("stable-diffusion")) return "image";
+  if (lower.includes("vision") || lower.includes("llava")) return "vision";
+  if (lower.includes("code") || lower.includes("codex")) return "code";
+  return "chat";
+}
+
+/* ── System prompt ── */
+
+const SYSTEM_PROMPT = `You are a helpful, friendly chat assistant powered by Cloudflare Workers AI.
 You run on Cloudflare's global edge network with zero cold starts.
 Keep responses concise and helpful. Use markdown formatting when appropriate.
-When asked about the time, use the current UTC time provided in your context.`,
-};
+When asked about the time, use the current UTC time provided in your context.`;
 
 /* ── Durable Object — ChatAgent ── */
 
@@ -63,7 +146,7 @@ export class ChatAgent implements DurableObject {
   }
 
   private async handleChat(request: Request): Promise<Response> {
-    const body = (await request.json()) as { message?: string };
+    const body = (await request.json()) as { message?: string; model?: string };
     const userMessage = body.message?.trim();
     if (!userMessage) {
       return new Response(
@@ -72,13 +155,15 @@ export class ChatAgent implements DurableObject {
       );
     }
 
+    const selectedModel = body.model || "@cf/meta/llama-3.1-8b-instruct";
+
     const history =
       (await this.state.storage.get<ChatMessage[]>("messages")) ?? [];
 
     history.push({ role: "user", content: userMessage });
 
     const messages: ChatMessage[] = [
-      { role: "system", content: AGENT_CONFIG.system },
+      { role: "system", content: SYSTEM_PROMPT },
       {
         role: "system",
         content: `Current UTC time: ${new Date().toISOString()}`,
@@ -89,21 +174,29 @@ export class ChatAgent implements DurableObject {
     const wantsStream =
       request.headers.get("Accept")?.includes("text/event-stream") ?? false;
 
-    if (wantsStream) {
-      return this.streamResponse(messages, history);
+    // Determine if this is a Workers AI model or gateway model
+    const isWorkersAI = selectedModel.startsWith("@cf/") || selectedModel.startsWith("@hf/");
+
+    if (isWorkersAI) {
+      if (wantsStream) {
+        return this.streamWorkersAI(messages, history, selectedModel);
+      }
+      return this.plainWorkersAI(messages, history, selectedModel);
     }
 
-    return this.plainResponse(messages, history);
+    // Gateway provider model
+    return this.handleGatewayChat(messages, history, selectedModel, wantsStream);
   }
 
-  private async streamResponse(
+  private async streamWorkersAI(
     messages: ChatMessage[],
     history: ChatMessage[],
+    model: string,
   ): Promise<Response> {
     const ai = this.env.AI;
     const storage = this.state.storage;
 
-    const stream = await ai.run(AGENT_CONFIG.model, {
+    const stream = await ai.run(model as BaseAiTextGenerationModels, {
       messages,
       stream: true,
     });
@@ -112,6 +205,9 @@ export class ChatAgent implements DurableObject {
     const encoder = new TextEncoder();
     const decoder = new TextDecoder();
     let fullText = "";
+    const isFirst = history.filter(m => m.role === "assistant").length === 0;
+    const chatEnv = this.env;
+    const threadId = (await this.state.storage.get<string>("threadId")) ?? "default";
 
     const readable = new ReadableStream({
       async pull(controller) {
@@ -119,6 +215,19 @@ export class ChatAgent implements DurableObject {
         if (done) {
           history.push({ role: "assistant", content: fullText });
           await storage.put("messages", history);
+
+          // Store transcript in KV
+          await persistTranscript(chatEnv, threadId, history);
+
+          // If first assistant response, trigger background image generation
+          if (isFirst && fullText.length > 0) {
+            controller.enqueue(
+              encoder.encode(
+                `data: ${JSON.stringify({ type: "generateImage", prompt: fullText.slice(0, 200) })}\n\n`,
+              ),
+            );
+          }
+
           controller.enqueue(encoder.encode("data: [DONE]\n\n"));
           controller.close();
           return;
@@ -158,11 +267,12 @@ export class ChatAgent implements DurableObject {
     });
   }
 
-  private async plainResponse(
+  private async plainWorkersAI(
     messages: ChatMessage[],
     history: ChatMessage[],
+    model: string,
   ): Promise<Response> {
-    const result = (await this.env.AI.run(AGENT_CONFIG.model, {
+    const result = (await this.env.AI.run(model as BaseAiTextGenerationModels, {
       messages,
     })) as { response: string };
 
@@ -170,8 +280,164 @@ export class ChatAgent implements DurableObject {
     history.push({ role: "assistant", content: text });
     await this.state.storage.put("messages", history);
 
+    const threadId = (await this.state.storage.get<string>("threadId")) ?? "default";
+    await persistTranscript(this.env, threadId, history);
+
     return new Response(JSON.stringify({ response: text }), {
       headers: { "Content-Type": "application/json" },
+    });
+  }
+
+  private async handleGatewayChat(
+    messages: ChatMessage[],
+    history: ChatMessage[],
+    model: string,
+    wantsStream: boolean,
+  ): Promise<Response> {
+    // Parse model format: "provider:model-id" e.g. "openai:gpt-4o"
+    const [providerSlug, ...modelParts] = model.split(":");
+    const modelId = modelParts.join(":");
+
+    const provider = GATEWAY_PROVIDERS.find(p => p.slug === providerSlug);
+    if (!provider) {
+      return new Response(
+        JSON.stringify({ error: `Unknown provider: ${providerSlug}` }),
+        { status: 400, headers: { "Content-Type": "application/json" } },
+      );
+    }
+
+    const gatewayId = this.env.AI_GATEWAY_ID || "default-gateway";
+    const gateway = this.env.AI.gateway(gatewayId);
+    const baseUrl = await gateway.getUrl(providerSlug);
+
+    // Format messages for Anthropic
+    const isAnthropic = providerSlug === "anthropic";
+    const requestBody = isAnthropic
+      ? {
+          model: modelId,
+          max_tokens: 4096,
+          system: messages.filter(m => m.role === "system").map(m => m.content).join("\n"),
+          messages: messages.filter(m => m.role !== "system").map(m => ({
+            role: m.role,
+            content: m.content,
+          })),
+          stream: wantsStream,
+        }
+      : {
+          model: modelId,
+          messages: messages.map(m => ({ role: m.role, content: m.content })),
+          stream: wantsStream,
+        };
+
+    const headers: Record<string, string> = {
+      "Content-Type": "application/json",
+    };
+    if (isAnthropic) {
+      headers["anthropic-version"] = "2023-06-01";
+    }
+
+    const res = await fetch(baseUrl + provider.chatEndpoint, {
+      method: "POST",
+      headers,
+      body: JSON.stringify(requestBody),
+    });
+
+    if (!res.ok) {
+      const errText = await res.text();
+      return new Response(
+        JSON.stringify({ error: `Provider error: ${res.status} ${errText}` }),
+        { status: 502, headers: { "Content-Type": "application/json" } },
+      );
+    }
+
+    if (wantsStream && res.body) {
+      return this.proxyGatewayStream(res.body, history, isAnthropic);
+    }
+
+    // Plain response
+    const data = await res.json() as Record<string, unknown>;
+    let text = "";
+    if (isAnthropic) {
+      const content = (data as { content?: { text?: string }[] }).content;
+      text = content?.[0]?.text ?? "";
+    } else {
+      const choices = (data as { choices?: { message?: { content?: string } }[] }).choices;
+      text = choices?.[0]?.message?.content ?? "";
+    }
+
+    history.push({ role: "assistant", content: text });
+    await this.state.storage.put("messages", history);
+    const threadId = (await this.state.storage.get<string>("threadId")) ?? "default";
+    await persistTranscript(this.env, threadId, history);
+
+    return new Response(JSON.stringify({ response: text }), {
+      headers: { "Content-Type": "application/json" },
+    });
+  }
+
+  private proxyGatewayStream(
+    body: ReadableStream,
+    history: ChatMessage[],
+    isAnthropic: boolean,
+  ): Response {
+    const reader = body.getReader();
+    const encoder = new TextEncoder();
+    const decoder = new TextDecoder();
+    let fullText = "";
+    const storage = this.state.storage;
+    const env = this.env;
+
+    const readable = new ReadableStream({
+      async pull(controller) {
+        const { done, value } = await reader.read();
+        if (done) {
+          history.push({ role: "assistant", content: fullText });
+          await storage.put("messages", history);
+          const threadId = (await storage.get<string>("threadId")) ?? "default";
+          await persistTranscript(env, threadId, history);
+          controller.enqueue(encoder.encode("data: [DONE]\n\n"));
+          controller.close();
+          return;
+        }
+
+        const chunk = decoder.decode(value, { stream: true });
+        const lines = chunk.split("\n");
+
+        for (const line of lines) {
+          if (!line.startsWith("data: ")) continue;
+          const data = line.slice(6).trim();
+          if (data === "[DONE]") continue;
+          try {
+            const parsed = JSON.parse(data);
+            let text = "";
+            if (isAnthropic) {
+              if (parsed.type === "content_block_delta" && parsed.delta?.text) {
+                text = parsed.delta.text;
+              }
+            } else {
+              text = parsed.choices?.[0]?.delta?.content ?? "";
+            }
+            if (text) {
+              fullText += text;
+              controller.enqueue(
+                encoder.encode(
+                  `data: ${JSON.stringify({ type: "text", text })}\n\n`,
+                ),
+              );
+            }
+          } catch {
+            /* skip malformed */
+          }
+        }
+      },
+    });
+
+    return new Response(readable, {
+      headers: {
+        "Content-Type": "text/event-stream",
+        "Cache-Control": "no-cache",
+        Connection: "keep-alive",
+      },
     });
   }
 
@@ -191,6 +457,291 @@ export class ChatAgent implements DurableObject {
   }
 }
 
+/* ── KV helpers ── */
+
+async function persistTranscript(env: Env, threadId: string, messages: ChatMessage[]): Promise<void> {
+  try {
+    await env.KV.put(
+      `transcript:${threadId}`,
+      JSON.stringify({ threadId, messages, updatedAt: new Date().toISOString() }),
+      { expirationTtl: 60 * 60 * 24 * 30 }, // 30 days
+    );
+  } catch {
+    // KV write failures shouldn't break chat
+  }
+}
+
+async function storeImageUrl(env: Env, threadId: string, imageUrl: string): Promise<void> {
+  try {
+    await env.KV.put(
+      `image:${threadId}`,
+      JSON.stringify({ url: imageUrl, createdAt: new Date().toISOString() }),
+      { expirationTtl: 60 * 60 * 24 * 30 }, // 30 days
+    );
+  } catch {
+    // KV write failures shouldn't break chat
+  }
+}
+
+/* ── Model listing ── */
+
+async function listModels(env: Env): Promise<ProviderGroup[]> {
+  const groups: ProviderGroup[] = [];
+
+  // 1. Workers AI models grouped by provider
+  const workersAiByProvider = new Map<string, ModelInfo[]>();
+  for (const model of WORKERS_AI_MODELS) {
+    // Only include chat, code, and vision for the dropdown (exclude embeddings, audio)
+    if (model.category === "chat" || model.category === "code" || model.category === "vision") {
+      const existing = workersAiByProvider.get(model.provider) ?? [];
+      existing.push(model);
+      workersAiByProvider.set(model.provider, existing);
+    }
+  }
+
+  for (const [provider, models] of workersAiByProvider) {
+    groups.push({ provider: `Workers AI / ${provider}`, slug: "workers-ai", models });
+  }
+
+  // 2. Gateway providers — try to list models from each
+  const gatewayId = env.AI_GATEWAY_ID || "default-gateway";
+
+  for (const provider of GATEWAY_PROVIDERS) {
+    if (!provider.modelListEndpoint) {
+      // Anthropic doesn't have a standard model list — use known models
+      if (provider.slug === "anthropic") {
+        groups.push({
+          provider: provider.name,
+          slug: provider.slug,
+          models: [
+            { id: `anthropic:claude-sonnet-4-20250514`, name: "Claude Sonnet 4", provider: "Anthropic", category: "chat", supportsStreaming: true },
+            { id: `anthropic:claude-haiku-3-5-20241022`, name: "Claude 3.5 Haiku", provider: "Anthropic", category: "chat", supportsStreaming: true },
+          ],
+        });
+      }
+      continue;
+    }
+
+    try {
+      const gateway = env.AI.gateway(gatewayId);
+      const baseUrl = await gateway.getUrl(provider.slug);
+      const res = await fetch(baseUrl + provider.modelListEndpoint, {
+        headers: { "Content-Type": "application/json" },
+      });
+
+      if (!res.ok) {
+        // Gateway may not have keys configured — add static fallbacks
+        groups.push(getStaticFallbackModels(provider.slug, provider.name));
+        continue;
+      }
+
+      const data = await res.json() as Record<string, unknown>;
+      const modelList = (provider.modelsPath
+        ? (data as Record<string, unknown[]>)[provider.modelsPath]
+        : data) as { id: string; name?: string }[];
+
+      if (!Array.isArray(modelList)) {
+        groups.push(getStaticFallbackModels(provider.slug, provider.name));
+        continue;
+      }
+
+      const filtered: ModelInfo[] = [];
+      for (const m of modelList) {
+        const cat = categorizeModel(m.id);
+        if (cat === null) continue; // excluded
+        filtered.push({
+          id: `${provider.slug}:${m.id}`,
+          name: m.name ?? m.id,
+          provider: provider.name,
+          category: cat,
+          supportsStreaming: true,
+        });
+      }
+
+      if (filtered.length > 0) {
+        groups.push({ provider: provider.name, slug: provider.slug, models: filtered });
+      } else {
+        groups.push(getStaticFallbackModels(provider.slug, provider.name));
+      }
+    } catch {
+      groups.push(getStaticFallbackModels(provider.slug, provider.name));
+    }
+  }
+
+  return groups;
+}
+
+function getStaticFallbackModels(slug: string, name: string): ProviderGroup {
+  switch (slug) {
+    case "openai":
+      return {
+        provider: name,
+        slug,
+        models: [
+          { id: "openai:gpt-4o", name: "GPT-4o", provider: "OpenAI", category: "chat", supportsStreaming: true },
+          { id: "openai:gpt-4o-mini", name: "GPT-4o Mini", provider: "OpenAI", category: "chat", supportsStreaming: true },
+          { id: "openai:gpt-4.1", name: "GPT-4.1", provider: "OpenAI", category: "chat", supportsStreaming: true },
+          { id: "openai:gpt-4.1-mini", name: "GPT-4.1 Mini", provider: "OpenAI", category: "chat", supportsStreaming: true },
+        ],
+      };
+    case "google-ai-studio":
+      return {
+        provider: name,
+        slug,
+        models: [
+          { id: "google-ai-studio:gemini-2.5-flash", name: "Gemini 2.5 Flash", provider: "Google", category: "chat", supportsStreaming: true },
+          { id: "google-ai-studio:gemini-2.5-pro", name: "Gemini 2.5 Pro", provider: "Google", category: "chat", supportsStreaming: true },
+        ],
+      };
+    default:
+      return { provider: name, slug, models: [] };
+  }
+}
+
+/* ── Image generation ── */
+
+async function generateBackgroundImage(
+  env: Env,
+  threadId: string,
+  prompt: string,
+): Promise<string | null> {
+  try {
+    // Generate a background image using Workers AI
+    const imagePrompt = `Beautiful abstract background inspired by: ${prompt.slice(0, 150)}. Ethereal, soft gradients, subtle, suitable as a chat background, no text, artistic`;
+
+    const imageStream = await env.AI.run(
+      "@cf/bytedance/stable-diffusion-xl-lightning",
+      { prompt: imagePrompt },
+    );
+
+    // Convert to JPEG via Images binding for optimization
+    let imageData: ArrayBuffer;
+    try {
+      const optimized = await env.IMAGES.input(imageStream as ReadableStream)
+        .transform({ width: 1280 })
+        .output({ format: "image/jpeg" });
+      const imgResponse = optimized.response();
+      imageData = await imgResponse.arrayBuffer();
+    } catch {
+      // If Images binding unavailable, use raw output
+      if (imageStream instanceof ReadableStream) {
+        const response = new Response(imageStream);
+        imageData = await response.arrayBuffer();
+      } else {
+        return null;
+      }
+    }
+
+    // Upload to Cloudflare Images if credentials available
+    if (env.CF_ACCOUNT_ID && env.CF_IMAGES_TOKEN) {
+      const formData = new FormData();
+      formData.append("file", new File([imageData], `bg-${threadId}.jpg`, { type: "image/jpeg" }));
+
+      const uploadRes = await fetch(
+        `https://api.cloudflare.com/client/v4/accounts/${env.CF_ACCOUNT_ID}/images/v1`,
+        {
+          method: "POST",
+          headers: { Authorization: `Bearer ${env.CF_IMAGES_TOKEN}` },
+          body: formData,
+        },
+      );
+
+      if (uploadRes.ok) {
+        const uploadData = await uploadRes.json() as {
+          result?: { variants?: string[] };
+        };
+        const imageUrl = uploadData.result?.variants?.[0];
+        if (imageUrl) {
+          await storeImageUrl(env, threadId, imageUrl);
+          return imageUrl;
+        }
+      }
+    }
+
+    // Fallback: store as base64 data URL in KV
+    const bytes = new Uint8Array(imageData);
+    let binary = "";
+    for (let i = 0; i < bytes.length; i++) {
+      binary += String.fromCharCode(bytes[i]);
+    }
+    const base64 = btoa(binary);
+    const dataUrl = `data:image/png;base64,${base64}`;
+
+    await storeImageUrl(env, threadId, dataUrl);
+    return dataUrl;
+  } catch {
+    return null;
+  }
+}
+
+/* ── Voice handlers ── */
+
+async function handleSTT(request: Request, env: Env): Promise<Response> {
+  try {
+    const audioData = await request.arrayBuffer();
+    if (audioData.byteLength === 0) {
+      return new Response(
+        JSON.stringify({ error: "No audio data provided" }),
+        { status: 400, headers: { "Content-Type": "application/json" } },
+      );
+    }
+
+    const result = await env.AI.run("@cf/openai/whisper-large-v3-turbo", {
+      audio: [...new Uint8Array(audioData)],
+    }) as { text?: string };
+
+    return new Response(
+      JSON.stringify({ text: result.text ?? "" }),
+      { headers: { "Content-Type": "application/json" } },
+    );
+  } catch (err) {
+    return new Response(
+      JSON.stringify({ error: `STT failed: ${err instanceof Error ? err.message : String(err)}` }),
+      { status: 500, headers: { "Content-Type": "application/json" } },
+    );
+  }
+}
+
+async function handleTTS(request: Request, env: Env): Promise<Response> {
+  try {
+    const body = (await request.json()) as { text?: string; voice?: string };
+    const text = body.text?.trim();
+    if (!text) {
+      return new Response(
+        JSON.stringify({ error: "text is required" }),
+        { status: 400, headers: { "Content-Type": "application/json" } },
+      );
+    }
+
+    const audio = await env.AI.run("@cf/myshell-ai/melotts", {
+      text,
+      language: "en",
+    });
+
+    // MeloTTS returns audio data
+    if (audio instanceof ReadableStream) {
+      return new Response(audio, {
+        headers: {
+          "Content-Type": "audio/wav",
+          "Cache-Control": "public, max-age=3600",
+        },
+      });
+    }
+
+    return new Response(audio as BodyInit, {
+      headers: {
+        "Content-Type": "audio/wav",
+        "Cache-Control": "public, max-age=3600",
+      },
+    });
+  } catch (err) {
+    return new Response(
+      JSON.stringify({ error: `TTS failed: ${err instanceof Error ? err.message : String(err)}` }),
+      { status: 500, headers: { "Content-Type": "application/json" } },
+    );
+  }
+}
+
 /* ── Worker fetch handler ── */
 
 const AGENT_PATHS = ["/chat", "/history", "/reset"];
@@ -199,10 +750,88 @@ export default {
   async fetch(
     request: Request,
     env: Env,
-    _ctx: ExecutionContext,
+    ctx: ExecutionContext,
   ): Promise<Response> {
     const url = new URL(request.url);
 
+    // CORS headers for all API routes
+    if (request.method === "OPTIONS") {
+      return new Response(null, {
+        headers: {
+          "Access-Control-Allow-Origin": "*",
+          "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+          "Access-Control-Allow-Headers": "Content-Type, Accept, x-thread-id",
+        },
+      });
+    }
+
+    const corsHeaders = {
+      "Access-Control-Allow-Origin": "*",
+    };
+
+    // Model listing
+    if (url.pathname === "/models" && request.method === "GET") {
+      const models = await listModels(env);
+      return new Response(JSON.stringify({ providers: models }), {
+        headers: { "Content-Type": "application/json", ...corsHeaders },
+      });
+    }
+
+    // Voice endpoints
+    if (url.pathname === "/voice/stt" && request.method === "POST") {
+      const res = await handleSTT(request, env);
+      return new Response(res.body, {
+        status: res.status,
+        headers: { ...Object.fromEntries(res.headers.entries()), ...corsHeaders },
+      });
+    }
+
+    if (url.pathname === "/voice/tts" && request.method === "POST") {
+      const res = await handleTTS(request, env);
+      return new Response(res.body, {
+        status: res.status,
+        headers: { ...Object.fromEntries(res.headers.entries()), ...corsHeaders },
+      });
+    }
+
+    // Image generation
+    if (url.pathname === "/generate-image" && request.method === "POST") {
+      const body = (await request.json()) as { prompt?: string; threadId?: string };
+      const prompt = body.prompt ?? "abstract background";
+      const threadId = body.threadId ?? "default";
+
+      const imageUrl = await generateBackgroundImage(env, threadId, prompt);
+      return new Response(
+        JSON.stringify({ imageUrl }),
+        { headers: { "Content-Type": "application/json", ...corsHeaders } },
+      );
+    }
+
+    // Serve stored image
+    if (url.pathname.startsWith("/image/") && request.method === "GET") {
+      const key = url.pathname.slice(7);
+      const data = await env.KV.get(`image:${key}`);
+      if (!data) {
+        return new Response("Not found", { status: 404 });
+      }
+      const { url: imageUrl } = JSON.parse(data) as { url: string };
+      if (imageUrl.startsWith("data:")) {
+        // Serve base64 data URL as image
+        const base64 = imageUrl.split(",")[1];
+        const binaryStr = atob(base64);
+        const bytes = new Uint8Array(binaryStr.length);
+        for (let i = 0; i < binaryStr.length; i++) {
+          bytes[i] = binaryStr.charCodeAt(i);
+        }
+        return new Response(bytes, {
+          headers: { "Content-Type": "image/png", "Cache-Control": "public, max-age=86400", ...corsHeaders },
+        });
+      }
+      // Redirect to Cloudflare Images URL
+      return Response.redirect(imageUrl, 302);
+    }
+
+    // Agent paths (chat, history, reset)
     if (AGENT_PATHS.some((p) => url.pathname === p)) {
       const threadId =
         request.headers.get("x-thread-id") ??
