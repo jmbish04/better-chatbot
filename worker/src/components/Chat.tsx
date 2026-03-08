@@ -109,7 +109,6 @@ export default function Chat() {
       }
 
       if (!accumulated) {
-        /* Fallback: treat the entire response body as plain text */
         const text = await res.clone().text();
         if (text) {
           setMessages((prev) => {
@@ -144,326 +143,372 @@ export default function Chat() {
   };
 
   return (
-    <div style={styles.container}>
-      {/* Header */}
-      <header style={styles.header}>
-        <div style={styles.headerInner}>
-          <div style={styles.logoRow}>
-            <CloudflareLogo />
-            <div>
-              <h1 style={styles.title}>Better Chatbot</h1>
-              <p style={styles.subtitle}>
-                Powered by Honi Agent &middot; Workers AI &middot; Cloudflare
-                Edge
-              </p>
-            </div>
-          </div>
-          <span style={styles.badge}>⚡ Workers</span>
-        </div>
-      </header>
+    <>
+      <style>{`
+        .chat-root {
+          display: flex;
+          flex-direction: column;
+          height: 100vh;
+          max-height: 100dvh;
+          position: relative;
+        }
 
-      {/* Messages */}
-      <div ref={scrollRef} style={styles.messages}>
-        {messages.length === 0 && (
-          <EmptyState
-            onSuggest={(text) => {
-              setInput(text);
-              setTimeout(() => inputRef.current?.focus(), 0);
-            }}
-          />
-        )}
-        {messages.map((msg, i) => (
-          <div
-            key={i}
-            style={{
-              ...styles.messageRow,
-              justifyContent:
-                msg.role === "user" ? "flex-end" : "flex-start",
-            }}
-          >
-            <div
-              style={{
-                ...styles.bubble,
-                ...(msg.role === "user"
-                  ? styles.userBubble
-                  : styles.agentBubble),
+        /* ── Messages scroll area ── */
+        .chat-messages {
+          flex: 1;
+          overflow-y: auto;
+          padding: 1.5rem 0;
+          scrollbar-gutter: stable both-edges;
+        }
+
+        /* ── Message row ── */
+        .msg-row {
+          width: 100%;
+          max-width: 48rem;
+          margin: 0 auto;
+          padding: 0 1.5rem;
+          animation: fadeIn 0.3s ease;
+        }
+
+        /* ── User message ── */
+        .msg-user-wrap {
+          display: flex;
+          flex-direction: column;
+          align-items: flex-end;
+          margin: 0.5rem 0;
+          gap: 0.5rem;
+        }
+        .msg-user-bubble {
+          max-width: 80%;
+          background: var(--accent);
+          color: var(--accent-foreground);
+          padding: 0.75rem 1rem;
+          border-radius: 1rem;
+          box-shadow: inset 0 0 0 1px var(--input);
+          font-size: 0.875rem;
+          line-height: 1.5;
+          white-space: pre-wrap;
+          word-break: break-word;
+        }
+
+        /* ── Assistant message ── */
+        .msg-assistant-wrap {
+          display: flex;
+          flex-direction: column;
+          gap: 1rem;
+          padding: 0.5rem;
+          margin: 0.25rem 0;
+        }
+        .msg-assistant-text {
+          font-size: 0.875rem;
+          line-height: 1.625;
+          white-space: pre-wrap;
+          word-break: break-word;
+          color: var(--foreground);
+        }
+
+        /* ── Greeting / empty state ── */
+        .greeting-wrap {
+          display: flex;
+          flex-direction: column;
+          align-items: center;
+          justify-content: center;
+          height: 100%;
+          animation: fadeIn 0.6s ease;
+        }
+        .greeting-inner {
+          max-width: 48rem;
+          margin: 0 auto;
+          padding: 1.5rem;
+          text-align: center;
+        }
+        .greeting-title {
+          font-size: 1.5rem;
+          font-weight: 400;
+          color: var(--foreground);
+          margin-bottom: 0.75rem;
+          line-height: 1.3;
+        }
+        @media (min-width: 768px) {
+          .greeting-title { font-size: 1.875rem; }
+        }
+        .greeting-subtitle {
+          font-size: 0.875rem;
+          color: var(--muted-foreground);
+          margin-bottom: 1.5rem;
+        }
+        .greeting-suggestions {
+          display: flex;
+          flex-wrap: wrap;
+          gap: 0.5rem;
+          justify-content: center;
+        }
+        .greeting-chip {
+          background: var(--secondary);
+          color: var(--secondary-foreground);
+          border: 1px solid var(--border);
+          border-radius: 9999px;
+          padding: 0.5rem 1rem;
+          font-size: 0.8125rem;
+          cursor: pointer;
+          transition: background 0.15s, border-color 0.15s;
+          font-family: inherit;
+        }
+        .greeting-chip:hover {
+          background: var(--muted);
+          border-color: var(--input);
+        }
+
+        /* ── Input area ── */
+        .input-area {
+          width: 100%;
+          max-width: 48rem;
+          margin: 0 auto;
+          padding: 0 1rem 1rem;
+          animation: fadeIn 0.5s ease;
+        }
+        .input-box {
+          position: relative;
+          display: flex;
+          flex-direction: column;
+          width: 100%;
+          background: color-mix(in oklch, var(--muted) 60%, transparent);
+          border-radius: 2rem;
+          box-shadow: 0 4px 20px rgba(0,0,0,0.2), 0 1px 4px rgba(0,0,0,0.15);
+          backdrop-filter: blur(4px);
+          transition: background 0.2s, box-shadow 0.2s;
+          overflow: hidden;
+          cursor: text;
+        }
+        .input-box:hover,
+        .input-box:focus-within {
+          background: var(--muted);
+        }
+        .input-editor {
+          display: flex;
+          flex-direction: column;
+          gap: 0.875rem;
+          padding: 0.5rem 1.25rem 1rem;
+        }
+        .input-textarea {
+          flex: 1;
+          background: transparent;
+          border: none;
+          outline: none;
+          color: var(--foreground);
+          font-size: 0.875rem;
+          font-family: inherit;
+          resize: none;
+          line-height: 1.5;
+          min-height: 2rem;
+          max-height: 10rem;
+        }
+        .input-textarea::placeholder {
+          color: var(--muted-foreground);
+        }
+        .input-actions {
+          display: flex;
+          align-items: center;
+          justify-content: flex-end;
+          padding: 0 0.75rem 0.5rem;
+        }
+        .send-btn {
+          display: inline-flex;
+          align-items: center;
+          justify-content: center;
+          width: 2rem;
+          height: 2rem;
+          border-radius: 9999px;
+          border: none;
+          background: var(--secondary);
+          color: var(--secondary-foreground);
+          cursor: pointer;
+          transition: background 0.2s, opacity 0.15s;
+          flex-shrink: 0;
+        }
+        .send-btn:hover:not(:disabled) {
+          background: var(--accent-foreground);
+          color: var(--accent);
+        }
+        .send-btn:disabled {
+          opacity: 0.35;
+          cursor: default;
+        }
+        .input-footer {
+          text-align: center;
+          font-size: 0.6875rem;
+          color: var(--muted-foreground);
+          padding: 0.5rem 0 0;
+          opacity: 0.6;
+        }
+
+        /* ── Typing indicator ── */
+        .typing-dots { display: inline-flex; gap: 4px; align-items: center; padding: 4px 0; }
+        .typing-dots span {
+          width: 6px; height: 6px; border-radius: 50%;
+          background: var(--muted-foreground);
+          animation: typingBounce 1.2s infinite;
+        }
+        .typing-dots span:nth-child(2) { animation-delay: 0.15s; }
+        .typing-dots span:nth-child(3) { animation-delay: 0.3s; }
+        @keyframes typingBounce {
+          0%, 60%, 100% { opacity: 0.3; transform: translateY(0); }
+          30% { opacity: 1; transform: translateY(-3px); }
+        }
+      `}</style>
+
+      <div className="chat-root">
+        {/* Messages */}
+        <div ref={scrollRef} className="chat-messages">
+          {messages.length === 0 ? (
+            <Greeting
+              onSuggest={(text) => {
+                setInput(text);
+                setTimeout(() => inputRef.current?.focus(), 0);
               }}
-            >
-              {msg.role === "assistant" && (
-                <span style={styles.roleLabel}>AI</span>
-              )}
-              <span style={styles.messageText}>
-                {msg.content || (isStreaming && i === messages.length - 1 ? "…" : "")}
-              </span>
+            />
+          ) : (
+            messages.map((msg, i) => (
+              <div key={i} className="msg-row">
+                {msg.role === "user" ? (
+                  <div className="msg-user-wrap">
+                    <div className="msg-user-bubble">{msg.content}</div>
+                  </div>
+                ) : (
+                  <div className="msg-assistant-wrap">
+                    <div className="msg-assistant-text">
+                      {msg.content ||
+                        (isStreaming && i === messages.length - 1 ? (
+                          <span className="typing-dots">
+                            <span />
+                            <span />
+                            <span />
+                          </span>
+                        ) : (
+                          ""
+                        ))}
+                    </div>
+                  </div>
+                )}
+              </div>
+            ))
+          )}
+        </div>
+
+        {/* Input */}
+        <div className="input-area">
+          <div
+            className="input-box"
+            onClick={() => inputRef.current?.focus()}
+          >
+            <div className="input-editor">
+              <textarea
+                ref={inputRef}
+                value={input}
+                onChange={(e) => setInput(e.target.value)}
+                onKeyDown={handleKeyDown}
+                placeholder="Ask anything…"
+                rows={1}
+                className="input-textarea"
+                disabled={isStreaming}
+              />
+            </div>
+            <div className="input-actions">
+              <button
+                onClick={sendMessage}
+                disabled={!input.trim() || isStreaming}
+                className="send-btn"
+                aria-label="Send message"
+              >
+                {isStreaming ? <Spinner /> : <ArrowUpIcon />}
+              </button>
             </div>
           </div>
-        ))}
-      </div>
-
-      {/* Input */}
-      <div style={styles.inputArea}>
-        <div style={styles.inputContainer}>
-          <textarea
-            ref={inputRef}
-            value={input}
-            onChange={(e) => setInput(e.target.value)}
-            onKeyDown={handleKeyDown}
-            placeholder="Send a message…"
-            rows={1}
-            style={styles.textarea}
-            disabled={isStreaming}
-          />
-          <button
-            onClick={sendMessage}
-            disabled={!input.trim() || isStreaming}
-            style={{
-              ...styles.sendBtn,
-              opacity: !input.trim() || isStreaming ? 0.4 : 1,
-            }}
-            aria-label="Send message"
-          >
-            {isStreaming ? <Spinner /> : <SendIcon />}
-          </button>
+          <p className="input-footer">
+            Powered by Honi Agent · Workers AI · Cloudflare Edge
+          </p>
         </div>
-        <p style={styles.footer}>
-          Running on Cloudflare Workers with zero cold starts
-        </p>
       </div>
-    </div>
+    </>
   );
 }
 
 /* ── Sub-components ── */
 
-function EmptyState({ onSuggest }: { onSuggest: (text: string) => void }) {
+function Greeting({ onSuggest }: { onSuggest: (text: string) => void }) {
+  const greetings = [
+    "What can I help with?",
+    "Good to see you again.",
+    "What are you working on today?",
+  ];
+  const greeting = greetings[Math.floor(Math.random() * greetings.length)];
+
   return (
-    <div style={styles.empty}>
-      <CloudflareLogo size={48} />
-      <h2 style={styles.emptyTitle}>Welcome to Better Chatbot</h2>
-      <p style={styles.emptyDesc}>
-        This chat is powered by a{" "}
-        <strong style={{ color: "#f6821f" }}>Honi agent</strong> running on
-        Cloudflare Workers with Workers AI. Try asking anything!
-      </p>
-      <div style={styles.suggestions}>
-        {[
-          "What can you do?",
-          "What time is it?",
-          "Calculate 42 * 17",
-        ].map((s) => (
-          <button key={s} style={styles.suggestion} onClick={() => onSuggest(s)}>
-            {s}
-          </button>
-        ))}
+    <div className="greeting-wrap">
+      <div className="greeting-inner">
+        <h1 className="greeting-title">{greeting}</h1>
+        <p className="greeting-subtitle">
+          Chat with a Honi agent running on Cloudflare Workers AI
+        </p>
+        <div className="greeting-suggestions">
+          {[
+            "What can you do?",
+            "What time is it?",
+            "Calculate 42 × 17",
+          ].map((s) => (
+            <button
+              key={s}
+              className="greeting-chip"
+              onClick={() => onSuggest(s)}
+            >
+              {s}
+            </button>
+          ))}
+        </div>
       </div>
     </div>
   );
 }
 
-function CloudflareLogo({ size = 28 }: { size?: number }) {
+function ArrowUpIcon() {
   return (
     <svg
-      width={size}
-      height={size}
-      viewBox="0 0 64 64"
+      width="16"
+      height="16"
+      viewBox="0 0 24 24"
       fill="none"
-      xmlns="http://www.w3.org/2000/svg"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
     >
-      <circle cx="32" cy="32" r="30" fill="#f6821f" />
-      <text
-        x="32"
-        y="42"
-        textAnchor="middle"
-        fill="white"
-        fontSize="28"
-        fontWeight="bold"
-        fontFamily="sans-serif"
-      >
-        ⚡
-      </text>
-    </svg>
-  );
-}
-
-function SendIcon() {
-  return (
-    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-      <line x1="22" y1="2" x2="11" y2="13" />
-      <polygon points="22 2 15 22 11 13 2 9 22 2" />
+      <line x1="12" y1="19" x2="12" y2="5" />
+      <polyline points="5 12 12 5 19 12" />
     </svg>
   );
 }
 
 function Spinner() {
   return (
-    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-      <circle cx="12" cy="12" r="10" opacity="0.25" />
+    <svg
+      width="16"
+      height="16"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+    >
+      <circle cx="12" cy="12" r="10" opacity="0.2" />
       <path d="M12 2a10 10 0 0 1 10 10" strokeLinecap="round">
-        <animateTransform attributeName="transform" type="rotate" from="0 12 12" to="360 12 12" dur="0.8s" repeatCount="indefinite" />
+        <animateTransform
+          attributeName="transform"
+          type="rotate"
+          from="0 12 12"
+          to="360 12 12"
+          dur="0.75s"
+          repeatCount="indefinite"
+        />
       </path>
     </svg>
   );
 }
-
-/* ── Inline styles ── */
-
-const styles: Record<string, React.CSSProperties> = {
-  container: {
-    display: "flex",
-    flexDirection: "column",
-    height: "100vh",
-    maxHeight: "100dvh",
-    background: "#0a0a0f",
-  },
-
-  /* Header */
-  header: {
-    borderBottom: "1px solid #2a2a45",
-    background: "rgba(10,10,15,0.85)",
-    backdropFilter: "blur(12px)",
-    padding: "12px 20px",
-    flexShrink: 0,
-  },
-  headerInner: {
-    maxWidth: 800,
-    margin: "0 auto",
-    display: "flex",
-    alignItems: "center",
-    justifyContent: "space-between",
-  },
-  logoRow: { display: "flex", alignItems: "center", gap: 12 },
-  title: { fontSize: 18, fontWeight: 700, color: "#e4e4f0" },
-  subtitle: { fontSize: 12, color: "#8888a8", marginTop: 2 },
-  badge: {
-    fontSize: 11,
-    fontWeight: 600,
-    color: "#f6821f",
-    background: "rgba(246,130,31,0.12)",
-    padding: "4px 10px",
-    borderRadius: 20,
-    border: "1px solid rgba(246,130,31,0.25)",
-  },
-
-  /* Messages */
-  messages: {
-    flex: 1,
-    overflowY: "auto",
-    padding: "24px 20px",
-    maxWidth: 800,
-    margin: "0 auto",
-    width: "100%",
-  },
-  messageRow: { display: "flex", marginBottom: 12 },
-  bubble: {
-    maxWidth: "80%",
-    padding: "10px 16px",
-    borderRadius: 12,
-    lineHeight: 1.55,
-    fontSize: 14,
-    whiteSpace: "pre-wrap" as const,
-    wordBreak: "break-word" as const,
-  },
-  userBubble: {
-    background: "#2d2d50",
-    color: "#e4e4f0",
-    borderBottomRightRadius: 4,
-  },
-  agentBubble: {
-    background: "#1a1a30",
-    color: "#e4e4f0",
-    border: "1px solid #2a2a45",
-    borderBottomLeftRadius: 4,
-  },
-  roleLabel: {
-    display: "inline-block",
-    fontSize: 10,
-    fontWeight: 700,
-    color: "#f6821f",
-    textTransform: "uppercase" as const,
-    marginBottom: 4,
-    letterSpacing: 0.5,
-  },
-  messageText: { display: "block" },
-
-  /* Empty */
-  empty: {
-    display: "flex",
-    flexDirection: "column",
-    alignItems: "center",
-    justifyContent: "center",
-    height: "100%",
-    gap: 16,
-    textAlign: "center" as const,
-    padding: 24,
-  },
-  emptyTitle: { fontSize: 22, fontWeight: 700 },
-  emptyDesc: { fontSize: 14, color: "#8888a8", maxWidth: 420 },
-  suggestions: {
-    display: "flex",
-    flexWrap: "wrap" as const,
-    gap: 8,
-    marginTop: 8,
-    justifyContent: "center",
-  },
-  suggestion: {
-    background: "#22223a",
-    color: "#e4e4f0",
-    border: "1px solid #2a2a45",
-    borderRadius: 20,
-    padding: "8px 16px",
-    fontSize: 13,
-    cursor: "pointer",
-  },
-
-  /* Input */
-  inputArea: {
-    borderTop: "1px solid #2a2a45",
-    background: "rgba(10,10,15,0.9)",
-    backdropFilter: "blur(12px)",
-    padding: "12px 20px",
-    flexShrink: 0,
-  },
-  inputContainer: {
-    maxWidth: 800,
-    margin: "0 auto",
-    display: "flex",
-    alignItems: "flex-end",
-    gap: 8,
-    background: "#12121a",
-    border: "1px solid #2a2a45",
-    borderRadius: 12,
-    padding: "8px 12px",
-  },
-  textarea: {
-    flex: 1,
-    background: "transparent",
-    border: "none",
-    outline: "none",
-    color: "#e4e4f0",
-    fontSize: 14,
-    fontFamily: "inherit",
-    resize: "none" as const,
-    lineHeight: 1.5,
-    maxHeight: 120,
-  },
-  sendBtn: {
-    background: "#f6821f",
-    color: "white",
-    border: "none",
-    borderRadius: 8,
-    width: 36,
-    height: 36,
-    display: "flex",
-    alignItems: "center",
-    justifyContent: "center",
-    cursor: "pointer",
-    flexShrink: 0,
-    transition: "opacity 0.15s",
-  },
-  footer: {
-    textAlign: "center" as const,
-    fontSize: 11,
-    color: "#555570",
-    marginTop: 8,
-  },
-};
