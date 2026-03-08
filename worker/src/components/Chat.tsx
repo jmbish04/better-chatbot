@@ -19,11 +19,13 @@ interface ProviderGroup {
   models: ModelInfo[];
 }
 
+const DEFAULT_MODEL = "@cf/meta/llama-3.1-8b-instruct";
+
 export default function Chat() {
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState("");
   const [isStreaming, setIsStreaming] = useState(false);
-  const [selectedModel, setSelectedModel] = useState("@cf/meta/llama-3.1-8b-instruct");
+  const [selectedModel, setSelectedModel] = useState(DEFAULT_MODEL);
   const [providers, setProviders] = useState<ProviderGroup[]>([]);
   const [modelsLoading, setModelsLoading] = useState(true);
   const [showModelPicker, setShowModelPicker] = useState(false);
@@ -289,32 +291,38 @@ export default function Chat() {
         return;
       }
 
-      // 2. Send as chat message
+      // 2. Send as chat message and wait for it to complete
       await sendMessage(transcribedText);
 
-      // 3. TTS on the response (get latest assistant message)
-      const latestAssistant = messages
-        .filter(m => m.role === "assistant")
-        .pop();
-
-      if (latestAssistant?.content) {
+      // 3. TTS on the latest assistant response — read fresh from state
+      // Use a small delay to ensure state is updated after sendMessage completes
+      setTimeout(async () => {
         try {
-          const ttsRes = await fetch("/voice/tts", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ text: latestAssistant.content.slice(0, 500) }),
-          });
+          // Get the latest messages from the DOM/state
+          const historyRes = await fetch("/history");
+          const historyData = (await historyRes.json()) as { messages?: { role: string; content: string }[] };
+          const latestAssistant = historyData.messages
+            ?.filter(m => m.role === "assistant")
+            .pop();
 
-          if (ttsRes.ok) {
-            const audioData = await ttsRes.arrayBuffer();
-            const audio = new Audio();
-            audio.src = URL.createObjectURL(new Blob([audioData], { type: "audio/wav" }));
-            audio.play().catch(() => {});
+          if (latestAssistant?.content) {
+            const ttsRes = await fetch("/voice/tts", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ text: latestAssistant.content.slice(0, 500) }),
+            });
+
+            if (ttsRes.ok) {
+              const audioData = await ttsRes.arrayBuffer();
+              const audio = new Audio();
+              audio.src = URL.createObjectURL(new Blob([audioData], { type: "audio/wav" }));
+              audio.play().catch(() => {});
+            }
           }
         } catch {
           // TTS failure is non-critical
         }
-      }
+      }, 500);
     } catch {
       // Voice processing failed
     } finally {
@@ -707,7 +715,7 @@ export default function Chat() {
         {/* Background image */}
         {backgroundImage && (
           <div
-            className={`chat-bg ${backgroundImage ? "loaded" : ""}`}
+            className="chat-bg loaded"
             style={{ backgroundImage: `url(${backgroundImage})` }}
           />
         )}

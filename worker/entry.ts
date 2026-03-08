@@ -665,7 +665,7 @@ async function generateBackgroundImage(
       binary += String.fromCharCode(bytes[i]);
     }
     const base64 = btoa(binary);
-    const dataUrl = `data:image/png;base64,${base64}`;
+    const dataUrl = `data:image/jpeg;base64,${base64}`;
 
     await storeImageUrl(env, threadId, dataUrl);
     return dataUrl;
