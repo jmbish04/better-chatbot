@@ -81,5 +81,6 @@
       "binding": "CLOUDFLARE_IMAGES_TOKEN",
       "store_id": "8c42fa70938644e0a8a109744467375f",
       "secret_name": "CLOUDFLARE_IMAGES_STREAM_TOKEN"
+}
   ]
 }
