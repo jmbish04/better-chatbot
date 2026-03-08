@@ -1,0 +1,91 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "better-chatbot-worker",
+  "main": "./entry.ts",
+  "compatibility_date": "2026-03-07",
+  "compatibility_flags": ["nodejs_compat"],
+
+  "assets": {
+    "binding": "ASSETS",
+    "directory": "./dist",
+    "not_found_handling": "single-page-application"
+  },
+
+  "ai": {
+    "binding": "AI"
+  },
+
+  "images": {
+    "binding": "IMAGES"
+  },
+
+  "kv_namespaces": [
+    {
+      "binding": "KV",
+      "id": "3a498ff9d41449129dbb4fca83bad44f"
+      // Create via: wrangler kv namespace create KV
+      // Then replace the id above with the output namespace ID
+    }
+  ],
+
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "AGENT",
+        "class_name": "ChatAgent"
+      }
+    ]
+  },
+
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_classes": ["ChatAgent"]
+    }
+  ],
+
+  "observability": {
+    "enabled": true
+  },
+
+  "vars": {
+    "AI_GATEWAY_ID": "default-gateway"
+  },
+
+  // Cron trigger — runs daily at midnight UTC to clean up expired images
+  "triggers": {
+    "crons": ["0 0 * * *"]
+  },
+
+  // Secret Store bindings.
+  // Setup:
+  //   1. Create a Secrets Store: wrangler secrets-store store create
+  //   2. Add secrets:
+  //        wrangler secrets-store secret create <STORE_ID> --name ai-gateway-token --scopes workers --remote
+  //        wrangler secrets-store secret create <STORE_ID> --name cloudflare-account-id --scopes workers --remote
+  //        wrangler secrets-store secret create <STORE_ID> --name cloudflare-images-token --scopes workers --remote
+  //        wrangler secrets-store secret create <STORE_ID> --name worker-api-key --scopes workers --remote
+  //   3. Replace REPLACE_WITH_STORE_ID below with your store ID
+  "secrets_store_secrets": [
+    {
+      "binding": "CLOUDFLARE_AI_GATEWAY_TOKEN",
+      "store_id": "8c42fa70938644e0a8a109744467375f",
+      "secret_name": "CLOUDFLARE_AI_GATEWAY_TOKEN"
+    },
+    {
+      "binding": "CLOUDFLARE_ACCOUNT_ID",
+      "store_id": "8c42fa70938644e0a8a109744467375f",
+      "secret_name": "CLOUDFLARE_ACCOUNT_ID"
+    },
+    {
+      "binding": "CLOUDFLARE_IMAGES_TOKEN",
+      "store_id": "8c42fa70938644e0a8a109744467375f",
+      "secret_name": "CLOUDFLARE_IMAGES_STREAM_TOKEN"
+    },
+    {
+      "binding": "WORKER_API_KEY",
+      "store_id": "8c42fa70938644e0a8a109744467375f",
+      "secret_name": "WORKER_API_KEY"
+    }
+  ]
+}

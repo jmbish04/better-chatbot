@@ -1,0 +1,31 @@
+{
+  "name": "better-chatbot-worker",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "astro build && wrangler dev",
+    "build": "astro build",
+    "preview": "astro build && wrangler dev",
+    "deploy": "astro build && wrangler deploy",
+    "cf-typegen": "wrangler types",
+    "astro": "astro"
+  },
+  "dependencies": {
+    "@ai-sdk/cloudflare": "npm:workers-ai-provider@^3.1.2",
+    "@astrojs/react": "^4.2.1",
+    "astro": "^5.16.0",
+    "honidev": "^0.5.5",
+    "hono": "^4.12.5",
+    "react": "^19.1.0",
+    "react-dom": "^19.1.0",
+    "zod": "^3.24.4"
+  },
+  "devDependencies": {
+    "@types/node": "^25.3.5",
+    "@types/react": "^19.1.8",
+    "@types/react-dom": "^19.1.6",
+    "typescript": "^5.9.3",
+    "wrangler": "^4.71.0"
+  }
+}
