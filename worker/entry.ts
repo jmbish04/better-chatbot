@@ -668,8 +668,9 @@ async function generateBackgroundImage(
     try {
       accountId = await env.CLOUDFLARE_ACCOUNT_ID.get();
       imagesToken = await env.CLOUDFLARE_IMAGES_TOKEN.get();
-    } catch {
-      // Secret Store unavailable — fall back to KV-only storage
+    } catch (err) {
+      console.warn("Failed to read Images secrets from Secret Store:", err);
+      // Fall back to KV-only storage
     }
 
     if (accountId && imagesToken) {
@@ -914,8 +915,8 @@ async function cleanupExpiredImages(env: Env): Promise<void> {
   try {
     accountId = await env.CLOUDFLARE_ACCOUNT_ID.get();
     imagesToken = await env.CLOUDFLARE_IMAGES_TOKEN.get();
-  } catch {
-    // Secret Store unavailable — nothing to clean up
+  } catch (err) {
+    console.warn("Cron cleanup: failed to read secrets from Secret Store:", err);
     return;
   }
 
@@ -956,8 +957,8 @@ async function cleanupExpiredImages(env: Env): Promise<void> {
           // KV entry will self-expire via TTL, but delete proactively
           await env.KV.delete(key.name);
         }
-      } catch {
-        // Skip individual failures, continue with other keys
+      } catch (err) {
+        console.warn(`Cron cleanup: failed to process ${key.name}:`, err);
       }
     }
 
