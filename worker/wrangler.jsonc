@@ -1,0 +1,71 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "better-chatbot-worker",
+  "main": "./entry.ts",
+  // Set this to today's date
+  "compatibility_date": "2025-03-01",
+  "compatibility_flags": ["nodejs_compat"],
+
+  "assets": {
+    "binding": "ASSETS",
+    "directory": "./dist",
+    "not_found_handling": "single-page-application"
+  },
+
+  "ai": {
+    "binding": "AI"
+  },
+
+  "images": {
+    "binding": "IMAGES"
+  },
+
+  "kv_namespaces": [
+    {
+      "binding": "KV",
+      "id": "REPLACE_WITH_KV_NAMESPACE_ID"
+      // Create via: wrangler kv namespace create KV
+      // Then replace the id above with the output namespace ID
+    }
+  ],
+
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "AGENT",
+        "class_name": "ChatAgent"
+      }
+    ]
+  },
+
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_classes": ["ChatAgent"]
+    }
+  ],
+
+  "observability": {
+    "enabled": true
+  },
+
+  "vars": {
+    "AI_GATEWAY_ID": "default-gateway"
+  },
+
+  // Secret Store binding for the AI Gateway authentication token.
+  // The gateway token authenticates requests and enables BYOK —
+  // provider API keys (OpenAI, Anthropic, Google) are stored on
+  // the AI Gateway dashboard, not in worker code or secrets.
+  // Setup:
+  //   1. Create a Secrets Store: wrangler secrets-store store create
+  //   2. Add the gateway token: wrangler secrets-store secret create <STORE_ID> --name ai-gateway-token --scopes workers --remote
+  //   3. Replace REPLACE_WITH_STORE_ID below with your store ID
+  "secrets_store_secrets": [
+    {
+      "binding": "CLOUDFLARE_AI_GATEWAY_TOKEN",
+      "store_id": "REPLACE_WITH_STORE_ID",
+      "secret_name": "ai-gateway-token"
+    }
+  ]
+}

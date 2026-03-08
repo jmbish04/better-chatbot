@@ -15,6 +15,10 @@
 
 /* ── Types ── */
 
+interface SecretStoreSecret {
+  get(): Promise<string>;
+}
+
 interface Env {
   AI: Ai;
   ASSETS: Fetcher;
@@ -24,6 +28,7 @@ interface Env {
   AI_GATEWAY_ID: string;
   CF_ACCOUNT_ID?: string;
   CF_IMAGES_TOKEN?: string;
+  CLOUDFLARE_AI_GATEWAY_TOKEN: SecretStoreSecret;
 }
 
 interface ChatMessage {
@@ -310,6 +315,15 @@ export class ChatAgent implements DurableObject {
     const gateway = this.env.AI.gateway(gatewayId);
     const baseUrl = await gateway.getUrl(providerSlug);
 
+    // Get gateway token from secret store for BYOK authentication.
+    // The gateway stores provider API keys — we only need the gateway token.
+    let gatewayToken: string | undefined;
+    try {
+      gatewayToken = await this.env.CLOUDFLARE_AI_GATEWAY_TOKEN.get();
+    } catch {
+      // Secret store may not be configured in dev
+    }
+
     // Format messages for Anthropic
     const isAnthropic = providerSlug === "anthropic";
     const requestBody = isAnthropic
@@ -334,6 +348,10 @@ export class ChatAgent implements DurableObject {
     };
     if (isAnthropic) {
       headers["anthropic-version"] = "2023-06-01";
+    }
+    // Authenticate with AI Gateway — stored keys (BYOK) handle provider auth
+    if (gatewayToken) {
+      headers["cf-aig-authorization"] = `Bearer ${gatewayToken}`;
     }
 
     const res = await fetch(baseUrl + provider.chatEndpoint, {
@@ -506,6 +524,14 @@ async function listModels(env: Env): Promise<ProviderGroup[]> {
   // 2. Gateway providers — try to list models from each
   const gatewayId = env.AI_GATEWAY_ID || "default-gateway";
 
+  // Get gateway token from secret store for BYOK authentication
+  let gatewayToken: string | undefined;
+  try {
+    gatewayToken = await env.CLOUDFLARE_AI_GATEWAY_TOKEN.get();
+  } catch {
+    // Secret store may not be configured in dev
+  }
+
   for (const provider of GATEWAY_PROVIDERS) {
     if (!provider.modelListEndpoint) {
       // Anthropic doesn't have a standard model list — use known models
@@ -525,8 +551,14 @@ async function listModels(env: Env): Promise<ProviderGroup[]> {
     try {
       const gateway = env.AI.gateway(gatewayId);
       const baseUrl = await gateway.getUrl(provider.slug);
+      const fetchHeaders: Record<string, string> = {
+        "Content-Type": "application/json",
+      };
+      if (gatewayToken) {
+        fetchHeaders["cf-aig-authorization"] = `Bearer ${gatewayToken}`;
+      }
       const res = await fetch(baseUrl + provider.modelListEndpoint, {
-        headers: { "Content-Type": "application/json" },
+        headers: fetchHeaders,
       });
 
       if (!res.ok) {
