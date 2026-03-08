@@ -320,8 +320,8 @@ export class ChatAgent implements DurableObject {
     let gatewayToken: string | undefined;
     try {
       gatewayToken = await this.env.CLOUDFLARE_AI_GATEWAY_TOKEN.get();
-    } catch {
-      // Secret store may not be configured in dev
+    } catch (err) {
+      console.warn("Failed to read CLOUDFLARE_AI_GATEWAY_TOKEN from secret store:", err);
     }
 
     // Format messages for Anthropic
@@ -528,8 +528,8 @@ async function listModels(env: Env): Promise<ProviderGroup[]> {
   let gatewayToken: string | undefined;
   try {
     gatewayToken = await env.CLOUDFLARE_AI_GATEWAY_TOKEN.get();
-  } catch {
-    // Secret store may not be configured in dev
+  } catch (err) {
+    console.warn("Failed to read CLOUDFLARE_AI_GATEWAY_TOKEN from secret store:", err);
   }
 
   for (const provider of GATEWAY_PROVIDERS) {
