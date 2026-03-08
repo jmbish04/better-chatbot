@@ -1,9 +1,15 @@
 /**
- * Worker entrypoint — Hono app with hono-agents middleware.
+ * Worker entrypoint — Hono app composing Honi agent with custom routes.
  *
  * This is the main entry point for the Cloudflare Worker. It uses Hono
- * for HTTP routing and hono-agents middleware for Cloudflare Agents SDK
- * integration (routing requests to the ChatAgent Durable Object).
+ * for HTTP routing and composes the honidev-powered ChatAgent with
+ * additional custom routes for voice, images, config, and auth.
+ *
+ * The ChatAgent is created via honidev's `createAgent()` which provides:
+ * - Persistent Durable Object memory per thread
+ * - Streaming AI responses via the Vercel AI SDK
+ * - Multi-provider model resolution (@cf/*, claude-*, gpt-*, gemini-*)
+ * - MCP server endpoint for tool exposure
  *
  * Route map:
  *   POST /auth             → Verify password, set auth cookie
@@ -13,9 +19,12 @@
  *   POST /voice/tts        → Text-to-speech (MeloTTS)
  *   POST /generate-image   → Generate background image → Cloudflare Images
  *   GET  /image/:key       → Redirect to Cloudflare Images delivery URL
- *   POST /chat             → ChatAgent DO: send message (SSE streaming)
- *   GET  /history          → ChatAgent DO: retrieve conversation history
- *   POST /reset            → ChatAgent DO: clear conversation memory
+ *   POST /chat             → Honi ChatAgent (streaming AI response)
+ *   GET  /history          → Honi ChatAgent (conversation history)
+ *   DELETE /history        → Honi ChatAgent (clear memory)
+ *   POST /reset            → Alias for DELETE /history
+ *   POST /mcp              → Honi ChatAgent MCP server
+ *   GET  /mcp/tools        → Honi ChatAgent MCP tool listing
  *   GET  /config           → Get all config settings
  *   GET  /config/:key      → Get a single config value
  *   PUT  /config/:key      → Set a single config value
@@ -26,8 +35,8 @@
  * Cron (daily at midnight UTC):
  *   scheduled              → Delete expired images from Cloudflare Images
  *
- * All API routes (except /auth and static assets) require authentication
- * when WORKER_API_KEY is configured in the Secrets Store.
+ * All API routes (except /auth, /auth/check, and static assets) require
+ * authentication when WORKER_API_KEY is configured in the Secrets Store.
  *
  * @module entry
  */
@@ -35,8 +44,17 @@
 import { Hono } from "hono";
 import { cors } from "hono/cors";
 
-/* ── Re-export the ChatAgent DO class so wrangler can find it ── */
-export { ChatAgent } from "./src/agents/chat-agent.js";
+/* ── Honi agent ── */
+import { chatAgent, ChatAgentDO } from "./src/agents/chat-agent.js";
+
+/**
+ * Export the ChatAgent Durable Object class.
+ *
+ * Wrangler requires the DO class to be exported from the main entry file.
+ * The class is created by honidev's `createAgent()` and provides persistent
+ * per-thread conversation memory backed by Durable Object storage.
+ */
+export const ChatAgent = ChatAgentDO;
 
 /* ── Module imports ── */
 import { isAuthenticated, isAuthRequired, handleAuth } from "./src/lib/auth.js";
@@ -91,6 +109,8 @@ const protectedPaths = [
   "/chat",
   "/history",
   "/reset",
+  "/mcp",
+  "/mcp/*",
   "/config",
   "/config/*",
 ];
@@ -102,7 +122,7 @@ for (const path of protectedPaths) {
 /**
  * Auth guard middleware — rejects unauthenticated requests with 401.
  *
- * Skips auth check if WORKER_API_KEY is not configured.
+ * Skips auth check if WORKER_API_KEY is not configured in the Secrets Store.
  */
 async function authGuard(
   c: { env: Env; req: { raw: Request }; json: (data: unknown, status?: number) => Response },
@@ -129,14 +149,10 @@ app.get("/models", async (c) => {
 /* ── Voice endpoints ── */
 
 /** POST /voice/stt — speech-to-text via Whisper. */
-app.post("/voice/stt", async (c) => {
-  return handleSTT(c.req.raw, c.env);
-});
+app.post("/voice/stt", async (c) => handleSTT(c.req.raw, c.env));
 
 /** POST /voice/tts — text-to-speech via MeloTTS. */
-app.post("/voice/tts", async (c) => {
-  return handleTTS(c.req.raw, c.env);
-});
+app.post("/voice/tts", async (c) => handleTTS(c.req.raw, c.env));
 
 /* ── Image generation ── */
 
@@ -179,32 +195,47 @@ app.get("/image/:key", async (c) => {
   });
 });
 
-/* ── Agent paths (chat, history, reset) → ChatAgent Durable Object ── */
+/* ── Honi agent routes (chat, history, reset, mcp) ── */
 
 /**
- * Route a request to the ChatAgent Durable Object.
+ * Delegate to the honidev agent's fetch handler.
  *
- * Uses the `x-thread-id` header or `threadId` query parameter to determine
- * which DO instance to route to. Defaults to "default" if not specified.
+ * The honidev `createAgent()` returns a Hono-based fetch handler that
+ * manages /chat (POST), /history (GET/DELETE), and /mcp routes internally.
+ * We forward matching requests to the agent's handler, passing through
+ * the Worker env and execution context.
  */
-function routeToAgent(c: { env: Env; req: { raw: Request; header: (name: string) => string | undefined; query: (name: string) => string | undefined } }): Promise<Response> {
-  const threadId =
-    c.req.header("x-thread-id") ??
-    c.req.query("threadId") ??
-    "default";
-  const id = c.env.AGENT.idFromName(threadId);
-  const agent = c.env.AGENT.get(id);
-  return agent.fetch(c.req.raw);
+async function delegateToAgent(c: { req: { raw: Request }; env: Env; executionCtx: ExecutionContext }): Promise<Response> {
+  return chatAgent.fetch(c.req.raw, c.env, c.executionCtx);
 }
 
-/** POST /chat — route to ChatAgent DO for message handling. */
-app.post("/chat", async (c) => routeToAgent(c));
+/** POST /chat — send a message to the Honi ChatAgent (streaming response). */
+app.post("/chat", async (c) => delegateToAgent(c));
 
-/** GET /history — route to ChatAgent DO for history retrieval. */
-app.get("/history", async (c) => routeToAgent(c));
+/** GET /history — retrieve conversation history from the Honi ChatAgent. */
+app.get("/history", async (c) => delegateToAgent(c));
 
-/** POST /reset — route to ChatAgent DO for memory reset. */
-app.post("/reset", async (c) => routeToAgent(c));
+/** DELETE /history — clear conversation memory in the Honi ChatAgent. */
+app.delete("/history", async (c) => delegateToAgent(c));
+
+/**
+ * POST /reset — alias for DELETE /history (backwards compatibility).
+ *
+ * Rewrites the request as a DELETE to /history and forwards to the agent.
+ */
+app.post("/reset", async (c) => {
+  const deleteReq = new Request(new URL("/history", c.req.raw.url).href, {
+    method: "DELETE",
+    headers: c.req.raw.headers,
+  });
+  return chatAgent.fetch(deleteReq, c.env, c.executionCtx);
+});
+
+/** POST /mcp — Honi agent MCP server endpoint. */
+app.post("/mcp", async (c) => delegateToAgent(c));
+
+/** GET /mcp/tools — list available tools from the Honi agent. */
+app.get("/mcp/tools", async (c) => delegateToAgent(c));
 
 /* ── Config settings endpoints ── */
 
@@ -233,6 +264,12 @@ app.all("*", async (c) => c.env.ASSETS.fetch(c.req.raw));
 export default {
   /**
    * Main fetch handler — delegates to the Hono app.
+   *
+   * The Hono app composes:
+   * 1. Auth middleware (WORKER_API_KEY via Secrets Store)
+   * 2. Honi agent routes (chat, history, mcp via createAgent)
+   * 3. Custom routes (voice, images, config, models)
+   * 4. Static assets catch-all (Astro via ASSETS binding)
    */
   fetch: app.fetch,
 
@@ -241,8 +278,7 @@ export default {
    *
    * KV image records have a 30-day TTL. This handler lists all `image:*`
    * keys, checks the `createdAt` timestamp, and deletes the corresponding
-   * Cloudflare Images entry for records older than 30 days. KV handles
-   * its own expiration, so we only need to clean up the Images API side.
+   * Cloudflare Images entry for records older than 30 days.
    */
   async scheduled(
     _controller: ScheduledController,
