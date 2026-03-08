@@ -8,9 +8,12 @@
  *   POST /reset           → Clear conversation memory
  *   POST /voice/stt       → Speech-to-text (Whisper)
  *   POST /voice/tts       → Text-to-speech (MeloTTS)
- *   POST /generate-image  → Generate background image
- *   GET  /image/:key      → Serve stored image from KV
+ *   POST /generate-image  → Generate background image → Cloudflare Images
+ *   GET  /image/:key      → Redirect to Cloudflare Images delivery URL
  *   *                     → Static Astro assets (ASSETS binding)
+ *
+ * Cron (daily):
+ *   scheduled             → Delete expired images from Cloudflare Images
  */
 
 /* ── Types ── */
@@ -475,11 +478,20 @@ async function persistTranscript(env: Env, threadId: string, messages: ChatMessa
   }
 }
 
-async function storeImageBytes(env: Env, threadId: string, imageData: ArrayBuffer): Promise<void> {
+async function storeImageRecord(
+  env: Env,
+  threadId: string,
+  imageId: string,
+  deliveryUrl: string,
+): Promise<void> {
   try {
     await env.KV.put(
       `image:${threadId}`,
-      imageData,
+      JSON.stringify({
+        imageId,
+        url: deliveryUrl,
+        createdAt: new Date().toISOString(),
+      }),
       { expirationTtl: 60 * 60 * 24 * 30 }, // 30 days
     );
   } catch {
@@ -650,10 +662,49 @@ async function generateBackgroundImage(
       }
     }
 
-    // Store optimized image bytes directly in KV (30-day TTL)
-    await storeImageBytes(env, threadId, imageData);
+    // Upload to Cloudflare Images via API (secrets from Secret Store)
+    let accountId: string | undefined;
+    let imagesToken: string | undefined;
+    try {
+      accountId = await env.CLOUDFLARE_ACCOUNT_ID.get();
+      imagesToken = await env.CLOUDFLARE_IMAGES_TOKEN.get();
+    } catch {
+      // Secret Store unavailable — fall back to KV-only storage
+    }
 
-    // Return the local serving URL
+    if (accountId && imagesToken) {
+      const formData = new FormData();
+      formData.append(
+        "file",
+        new File([imageData], `bg-${threadId}.jpg`, { type: "image/jpeg" }),
+      );
+
+      const uploadRes = await fetch(
+        `https://api.cloudflare.com/client/v4/accounts/${accountId}/images/v1`,
+        {
+          method: "POST",
+          headers: { Authorization: `Bearer ${imagesToken}` },
+          body: formData,
+        },
+      );
+
+      if (uploadRes.ok) {
+        const uploadData = (await uploadRes.json()) as {
+          result?: { id?: string; variants?: string[] };
+        };
+        const imageId = uploadData.result?.id;
+        const deliveryUrl = uploadData.result?.variants?.[0];
+        if (imageId && deliveryUrl) {
+          await storeImageRecord(env, threadId, imageId, deliveryUrl);
+          return deliveryUrl;
+        }
+      }
+    }
+
+    // Fallback: serve via local /image/:key from KV raw bytes
+    await env.KV.put(`image:${threadId}`, imageData, {
+      expirationTtl: 60 * 60 * 24 * 30,
+    });
     return `/image/${threadId}`;
   } catch {
     return null;
@@ -793,9 +844,24 @@ export default {
       );
     }
 
-    // Serve stored image from KV
+    // Serve stored image
     if (url.pathname.startsWith("/image/") && request.method === "GET") {
       const key = url.pathname.slice(7);
+
+      // Try JSON record first (Cloudflare Images upload)
+      const jsonData = await env.KV.get(`image:${key}`, "text");
+      if (jsonData) {
+        try {
+          const record = JSON.parse(jsonData) as { url?: string };
+          if (record.url) {
+            return Response.redirect(record.url, 302);
+          }
+        } catch {
+          // Not JSON — treat as raw bytes below
+        }
+      }
+
+      // Fallback: raw bytes in KV
       const imageData = await env.KV.get(`image:${key}`, "arrayBuffer");
       if (!imageData) {
         return new Response("Not found", { status: 404 });
@@ -822,4 +888,79 @@ export default {
 
     return env.ASSETS.fetch(request);
   },
+
+  /**
+   * Cron trigger — runs daily to delete expired Cloudflare Images.
+   *
+   * KV image records have a 30-day TTL. This handler lists all `image:*`
+   * keys, checks the `createdAt` timestamp, and deletes the corresponding
+   * Cloudflare Images entry for records older than 30 days. KV handles
+   * its own expiration, so we only need to clean up the Images API side.
+   */
+  async scheduled(
+    _controller: ScheduledController,
+    env: Env,
+    ctx: ExecutionContext,
+  ): Promise<void> {
+    ctx.waitUntil(cleanupExpiredImages(env));
+  },
 };
+
+const IMAGE_TTL_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
+
+async function cleanupExpiredImages(env: Env): Promise<void> {
+  let accountId: string | undefined;
+  let imagesToken: string | undefined;
+  try {
+    accountId = await env.CLOUDFLARE_ACCOUNT_ID.get();
+    imagesToken = await env.CLOUDFLARE_IMAGES_TOKEN.get();
+  } catch {
+    // Secret Store unavailable — nothing to clean up
+    return;
+  }
+
+  if (!accountId || !imagesToken) return;
+
+  const now = Date.now();
+  let cursor: string | undefined;
+
+  do {
+    const listResult = await env.KV.list({
+      prefix: "image:",
+      cursor,
+    });
+
+    for (const key of listResult.keys) {
+      try {
+        const data = await env.KV.get(key.name, "text");
+        if (!data) continue;
+
+        const record = JSON.parse(data) as {
+          imageId?: string;
+          createdAt?: string;
+        };
+
+        // Only process Cloudflare Images records (have imageId)
+        if (!record.imageId || !record.createdAt) continue;
+
+        const age = now - new Date(record.createdAt).getTime();
+        if (age >= IMAGE_TTL_MS) {
+          // Delete from Cloudflare Images
+          await fetch(
+            `https://api.cloudflare.com/client/v4/accounts/${accountId}/images/v1/${record.imageId}`,
+            {
+              method: "DELETE",
+              headers: { Authorization: `Bearer ${imagesToken}` },
+            },
+          );
+          // KV entry will self-expire via TTL, but delete proactively
+          await env.KV.delete(key.name);
+        }
+      } catch {
+        // Skip individual failures, continue with other keys
+      }
+    }
+
+    cursor = listResult.list_complete ? undefined : listResult.cursor;
+  } while (cursor);
+}

@@ -53,19 +53,34 @@
     "AI_GATEWAY_ID": "default-gateway"
   },
 
-  // Secret Store binding for the AI Gateway authentication token.
-  // The gateway token authenticates requests and enables BYOK —
-  // provider API keys (OpenAI, Anthropic, Google) are stored on
-  // the AI Gateway dashboard, not in worker code or secrets.
+  // Cron trigger — runs daily at midnight UTC to clean up expired images
+  "triggers": {
+    "crons": ["0 0 * * *"]
+  },
+
+  // Secret Store bindings.
   // Setup:
   //   1. Create a Secrets Store: wrangler secrets-store store create
-  //   2. Add the gateway token: wrangler secrets-store secret create <STORE_ID> --name ai-gateway-token --scopes workers --remote
+  //   2. Add secrets:
+  //        wrangler secrets-store secret create <STORE_ID> --name ai-gateway-token --scopes workers --remote
+  //        wrangler secrets-store secret create <STORE_ID> --name cloudflare-account-id --scopes workers --remote
+  //        wrangler secrets-store secret create <STORE_ID> --name cloudflare-images-token --scopes workers --remote
   //   3. Replace REPLACE_WITH_STORE_ID below with your store ID
   "secrets_store_secrets": [
     {
       "binding": "CLOUDFLARE_AI_GATEWAY_TOKEN",
       "store_id": "REPLACE_WITH_STORE_ID",
       "secret_name": "ai-gateway-token"
+    },
+    {
+      "binding": "CLOUDFLARE_ACCOUNT_ID",
+      "store_id": "REPLACE_WITH_STORE_ID",
+      "secret_name": "cloudflare-account-id"
+    },
+    {
+      "binding": "CLOUDFLARE_IMAGES_TOKEN",
+      "store_id": "REPLACE_WITH_STORE_ID",
+      "secret_name": "cloudflare-images-token"
     }
   ]
 }
