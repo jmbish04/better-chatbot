@@ -1,13 +1,13 @@
 {
   "$schema": "./node_modules/wrangler/config-schema.json",
   "name": "better-chatbot-worker",
-  "main": "./entry.ts",
+  "main": ".open-next/worker.js",
   "compatibility_date": "2026-03-07",
   "compatibility_flags": ["nodejs_compat"],
 
   "assets": {
     "binding": "ASSETS",
-    "directory": "./dist",
+    "directory": ".open-next/assets",
     "not_found_handling": "single-page-application"
   },
 
