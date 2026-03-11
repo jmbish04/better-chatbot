@@ -105,6 +105,7 @@ const protectedPaths = [
   "/config/*",
   "/threads",
   "/threads/*",
+  "/image/*",
 ];
 
 for (const path of protectedPaths) {
