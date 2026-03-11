@@ -249,11 +249,8 @@ export default function Chat() {
     const headers: HeadersInit = {
       "Content-Type": "application/json",
       Accept: "text/event-stream",
+      ...(currentThreadIdRef.current && { "x-thread-id": currentThreadIdRef.current }),
     };
-    // Only send thread ID if we already have one
-    if (currentThreadIdRef.current) {
-      (headers as Record<string, string>)["x-thread-id"] = currentThreadIdRef.current;
-    }
 
     try {
       const res = await fetch("/chat", {
