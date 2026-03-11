@@ -12,7 +12,7 @@ import { sqliteTable, text, integer } from "drizzle-orm/sqlite-core";
 /** One chat conversation, identified by a backend-generated UUID. */
 export const threads = sqliteTable("threads", {
   id: text("id").primaryKey(),
-  title: text("title").notNull().default("New Chat"),
+  title: text("title").notNull(),
   createdAt: integer("created_at").notNull(),
   updatedAt: integer("updated_at").notNull(),
 });
