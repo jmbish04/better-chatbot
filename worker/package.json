@@ -7,14 +7,19 @@
     "dev": "astro build && wrangler dev",
     "build": "astro build",
     "preview": "astro build && wrangler dev",
-    "deploy": "astro build && wrangler deploy",
+    "deploy": "astro build && drizzle-kit generate && wrangler d1 migrations apply DB --remote && wrangler deploy",
+    "db:generate": "drizzle-kit generate",
+    "migrate:local": "drizzle-kit generate && wrangler d1 migrations apply DB --local",
+    "migrate:remote": "drizzle-kit generate && wrangler d1 migrations apply DB --remote",
     "cf-typegen": "wrangler types",
     "astro": "astro"
   },
   "dependencies": {
     "@ai-sdk/cloudflare": "npm:workers-ai-provider@^3.1.2",
     "@astrojs/react": "^4.2.1",
+    "@hono/zod-validator": "^0.4.3",
     "astro": "^5.16.0",
+    "drizzle-orm": "^0.44.0",
     "honidev": "^0.5.5",
     "hono": "^4.12.5",
     "react": "^19.1.0",
@@ -25,6 +30,7 @@
     "@types/node": "^25.3.5",
     "@types/react": "^19.1.8",
     "@types/react-dom": "^19.1.6",
+    "drizzle-kit": "^0.31.0",
     "typescript": "^5.9.3",
     "wrangler": "^4.71.0"
   }
